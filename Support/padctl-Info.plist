@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>io.nativ.walkingpad.padctl</string>
+    <key>CFBundleName</key>
+    <string>padctl</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <!-- A bare executable has no bundle, so the usage string is linked into the
+         binary's __TEXT,__info_plist section instead. Without it, TCC aborts the
+         process the moment it touches CoreBluetooth. -->
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>padctl connects to your WalkingPad treadmill over Bluetooth to report live stats and change the belt speed.</string>
+</dict>
+</plist>
