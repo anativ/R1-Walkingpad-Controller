@@ -28,6 +28,8 @@ final class AppModel: ObservableObject {
     let controller = PadController()
     let tracker = SessionTracker()
     let runner = ProgramRunner()
+    let recorder = SessionRecorder()
+    let store = SessionStore()
 
     /// The program currently being edited in the UI. Persisted so it survives a relaunch.
     ///
@@ -72,6 +74,7 @@ final class AppModel: ObservableObject {
             storedSettings = newValue
             persist()
             tracker.profile = newValue.profile
+            recorder.profile = newValue.profile
             // A Slider whose value sits outside its own range misbehaves, so follow the ceiling down.
             let ceiling = min(newValue.speedCeilingKph, AppSettings.hardMaxSpeedKph)
             if desiredSpeedKph > ceiling {
@@ -111,6 +114,17 @@ final class AppModel: ObservableObject {
             // The belt's 1 Hz status stream is the program's clock: it can only advance while the
             // belt is actually connected and reporting.
             self.runner.tick(beltIsMoving: status.isMoving)
+            // Record the walk. The recorder returns a session when one has just finished.
+            self.recorder.programName = self.runner.activeProgram?.name
+            if let finished = self.recorder.ingest(status) {
+                self.store.append(finished)
+                self.controller.appendLog(
+                    String(format: "Saved walk: %@ · %.2f km · %d steps",
+                           Metrics.formatDuration(finished.durationSeconds),
+                           finished.distanceKm, finished.steps),
+                    .info
+                )
+            }
             if !self.hasAlignedTargetWithBelt {
                 self.hasAlignedTargetWithBelt = true
                 self.desiredSpeedKph = status.isMoving
@@ -129,6 +143,9 @@ final class AppModel: ObservableObject {
                 if !connected {
                     self.hasAlignedTargetWithBelt = false
                     self.runner.stop(reason: "belt disconnected")
+                    // Bank the walk in progress rather than losing it to the dropout.
+                    self.finishOpenWalk()
+                    self.recorder.clear()
                 }
             }
             .store(in: &cancellables)
@@ -139,8 +156,16 @@ final class AppModel: ObservableObject {
         runner.onNote = { [weak self] note in self?.controller.appendLog(note, .info) }
 
         runner.objectWillChange
+            .merge(with: store.objectWillChange)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
+        recorder.profile = loaded.profile
+
+        // Quitting mid-walk should still save it.
+        NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)
+            .sink { [weak self] _ in self?.finishOpenWalk() }
             .store(in: &cancellables)
 
         // Re-render on belt updates and on tracker changes.
@@ -251,6 +276,41 @@ final class AppModel: ObservableObject {
         let rounded = (kph * 10).rounded() / 10
         return min(max(0, rounded), effectiveMaxSpeed)
     }
+
+    // MARK: - Walk history
+
+    /// Close and save the walk in progress, if there is one worth keeping.
+    func finishOpenWalk() {
+        if let finished = recorder.finish() {
+            store.append(finished)
+        }
+    }
+
+    /// Every recorded walk, newest first.
+    var sessions: [WalkSession] { store.sessionsNewestFirst }
+
+    /// Lifetime totals across everything recorded.
+    var lifetimeTotals: WalkTotals { WalkStats.totals(store.sessions) }
+
+    /// Totals including the walk currently in progress, so the dashboard adds up live.
+    var lifetimeTotalsIncludingCurrent: WalkTotals {
+        var totals = lifetimeTotals
+        if let open = recorder.openSession {
+            totals.distanceKm += open.distanceKm
+            totals.durationSeconds += open.duration
+            totals.steps += open.steps
+            totals.kcal += open.kcal
+        }
+        return totals
+    }
+
+    var isRecordingWalk: Bool { recorder.isRecording }
+
+    func deleteSession(_ session: WalkSession) { store.delete(session) }
+    func deleteSessions(ids: Set<UUID>) { store.delete(ids: ids) }
+
+    /// CSV of the whole history, for export.
+    func historyCSV() -> String { WalkStats.csv(store.sessions) }
 
     // MARK: - Programs ("algorithms")
 

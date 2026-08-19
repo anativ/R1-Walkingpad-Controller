@@ -10,6 +10,9 @@ vendor account, no phone required.
 
 Everything the belt reports, plus what can be derived from it:
 
+Plus a full walk history: every session saved automatically, with per-day/week/month stats,
+charts and CSV export — see [History](#history).
+
 | From the belt | Derived in the app |
 | --- | --- |
 | Current speed, belt state, mode | Pace (min/km or min/mi) |
@@ -67,6 +70,33 @@ Rules worth knowing:
   lower it below the whole band and the program stops.
 
 Adding another algorithm means one case in `SpeedProgram.Kind` and one branch in `SpeedSequence.next`.
+
+## History
+
+Every walk is saved automatically — no button to press. The dashboard shows an **All time** row
+(total distance, total walk time, average speed, walk count) and **⌘Y** opens the History window:
+
+- Lifetime totals, including the walk currently in progress
+- Distance / time / steps / calories charted per **day, week or month**, with the days you did not
+  walk shown as gaps rather than closed up
+- Averages per active day, week and month, plus how many active periods there were
+- Highlights: current day streak, best day, best month, longest walk
+- A sortable, selectable table of every walk, with delete and **CSV export**
+
+Sessions are stored as JSON in `~/Library/Application Support/WalkingPad/sessions.json`, written
+atomically so an interrupted save cannot truncate your history.
+
+A walk starts when the belt begins moving and ends when the belt's counters reset, when it has been
+idle for two minutes, or when the app disconnects or quits. Walks under 30 seconds or 20 steps are
+discarded so a nudge of the belt does not become an entry.
+
+One subtlety worth knowing: the belt's counters are **cumulative** and only reset when it sleeps, so
+each walk is recorded as a delta against a baseline captured when walking began. Without that, a
+second walk on the same belt session would silently re-count the first walk's distance. There is a
+check pinning exactly that.
+
+Averages are taken over periods that *had* a walk, not over the whole calendar — "average per day"
+answers "on days I walked" rather than being diluted by rest days.
 
 ## Build and run
 

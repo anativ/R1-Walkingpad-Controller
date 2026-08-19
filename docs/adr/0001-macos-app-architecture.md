@@ -52,7 +52,14 @@ Constraints discovered while setting up:
    program rather than fighting it. Adding an algorithm is one `SpeedProgram.Kind` case plus one
    branch in `SpeedSequence.next`; the sequence logic is pure and therefore covered by
    `padctl selftest`.
-9. **The write queue is a separate value type** (`CommandQueue`), so its two correctness rules —
+9. **Walk history is delta-recorded and stored as JSON in Application Support.** The belt's
+   counters are cumulative and reset only when it sleeps, so each session is recorded as a delta
+   against a baseline captured when walking began; recording the raw counters would re-count an
+   earlier walk every time someone resumed without resetting the belt. History lives in a file
+   rather than `UserDefaults` because the dataset grows without bound, and writes are atomic so an
+   interrupted save cannot truncate it. Aggregation (`WalkStats`) is pure and therefore covered by
+   `padctl selftest`, including the disk round trip.
+10. **The write queue is a separate value type** (`CommandQueue`), so its two correctness rules —
    control frames outrank status polls, and coalescing replaces *in place* — are verified in
    `padctl selftest` without a CoreBluetooth session.
 

@@ -33,6 +33,15 @@ let allChecks: [(String, () throws -> Void)] = [
     ("start sequence keeps order after partial drain", startSequenceKeepsOrderAfterPartialDrain),
     ("repeated start batches do not grow queue", repeatedStartBatchesDoNotGrowQueue),
     ("controller clamps speed at the wire", controllerClampsSpeedAtTheWire),
+    ("recorder uses deltas, not cumulative counters", recorderUsesDeltasNotCumulativeCounters),
+    ("recorder closes session on counter reset", recorderClosesSessionOnCounterReset),
+    ("recorder discards trivial walks", recorderDiscardsTrivialWalks),
+    ("stats totals and averages", statsTotalsAndAverages),
+    ("stats continuous buckets include empty periods", statsContinuousBucketsIncludeEmptyPeriods),
+    ("stats day streak", statsDayStreak),
+    ("stats csv export", statsCsvExport),
+    ("session derived figures", sessionDerivedFigures),
+    ("session store round trips through disk", sessionStoreRoundTripsThroughDisk),
 ]
 
 func usage() -> Never {

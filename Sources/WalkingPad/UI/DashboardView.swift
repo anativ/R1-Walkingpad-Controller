@@ -21,6 +21,7 @@ struct DashboardView: View {
                     )
                 }
                 ModePickerView()
+                AllTimeSummaryView()
                 StoredSessionView()
                 DisclosureGroup("Diagnostics", isExpanded: $showDiagnostics) {
                     DiagnosticsView()
@@ -198,6 +199,53 @@ struct MetricsGrid: View {
                 systemImage: "arrow.up.right",
                 tint: .red
             )
+        }
+    }
+}
+
+/// Lifetime totals, with a way through to the full history.
+struct AllTimeSummaryView: View {
+    @EnvironmentObject private var app: AppModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        let totals = app.lifetimeTotalsIncludingCurrent
+        let unit = app.settings.unit
+        return CardSection(
+            title: "All time",
+            systemImage: "sum",
+            trailing: AnyView(
+                Button("History…") { openWindow(id: "history") }
+                    .controlSize(.small)
+            )
+        ) {
+            if totals.sessionCount == 0 && !app.isRecordingWalk {
+                Text("Walks are saved automatically. Your totals and history will appear here.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 22) {
+                    figure("Distance",
+                           String(format: "%.1f %@",
+                                  unit.distance(fromKm: totals.distanceKm), unit.distanceSuffix))
+                    figure("Walk time", Metrics.formatDuration(totals.durationSeconds))
+                    figure("Avg speed",
+                           String(format: "%.1f %@",
+                                  unit.speed(fromKph: totals.averageSpeedKph), unit.speedSuffix))
+                    figure("Walks", "\(totals.sessionCount)")
+                    Spacer()
+                    if app.isRecordingWalk {
+                        StatusChip(text: "recording", systemImage: "record.circle", tint: .green)
+                    }
+                }
+            }
+        }
+    }
+
+    private func figure(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.callout.weight(.medium)).monospacedDigit()
         }
     }
 }

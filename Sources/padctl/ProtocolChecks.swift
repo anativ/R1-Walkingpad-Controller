@@ -487,3 +487,232 @@ func controllerClampsSpeedAtTheWire() throws {
           "a nonsense value must clamp, not trap")
     check(PadController.maxSafeSpeedKph == 10.0)
 }
+
+// MARK: - Session recording and history stats
+
+/// Build a status frame with chosen counters.
+private func frame(elapsed: Int, distanceRaw: Int, steps: Int, speedRaw: UInt8) -> PadStatus {
+    var bytes = capturedStatus
+    bytes[3] = speedRaw
+    let t = PadPacket.bytes24(elapsed);   bytes[5] = t[0];  bytes[6] = t[1];  bytes[7] = t[2]
+    let d = PadPacket.bytes24(distanceRaw); bytes[8] = d[0]; bytes[9] = d[1]; bytes[10] = d[2]
+    let s = PadPacket.bytes24(steps);     bytes[11] = s[0]; bytes[12] = s[1]; bytes[13] = s[2]
+    return PadStatus(data: bytes)!
+}
+
+/// A second walk on the same belt session must record only its own distance. The belt's counters
+/// are cumulative and do NOT reset when you merely stop, so a naive recorder double-counts.
+func recorderUsesDeltasNotCumulativeCounters() throws {
+    let recorder = SessionRecorder(idleTimeout: 60, minimumDuration: 30, minimumSteps: 20)
+    let t0 = Date(timeIntervalSince1970: 5_000_000)
+
+    // Walk one: 0 -> 600s, 0 -> 1.00 km, 0 -> 1200 steps, fed in realistic increments (the
+    // calorie integrator deliberately ignores jumps over 120s, which is what a reconnect looks like).
+    check(recorder.ingest(frame(elapsed: 0, distanceRaw: 0, steps: 0, speedRaw: 30), now: t0) == nil)
+    check(recorder.isRecording, "movement should open a session")
+    for i in 1...10 {
+        check(recorder.ingest(
+            frame(elapsed: i * 60, distanceRaw: i * 10, steps: i * 120, speedRaw: 30),
+            now: t0.addingTimeInterval(Double(i * 60))) == nil)
+    }
+
+    // Belt stops; after the idle timeout the walk is closed out.
+    _ = recorder.ingest(frame(elapsed: 600, distanceRaw: 100, steps: 1200, speedRaw: 0),
+                        now: t0.addingTimeInterval(601))
+    let first = try require(recorder.ingest(
+        frame(elapsed: 600, distanceRaw: 100, steps: 1200, speedRaw: 0),
+        now: t0.addingTimeInterval(700)))
+    check(first.durationSeconds == 600, "duration \(first.durationSeconds)")
+    check(first.distanceKm == 1.0, "distance \(first.distanceKm)")
+    check(first.steps == 1200, "steps \(first.steps)")
+    check(first.kcal > 0, "calories should have accrued")
+    check(!recorder.isRecording, "session should be closed")
+
+    // Walk two, WITHOUT the belt resetting: counters continue from 600s / 1.00 km / 1200 steps.
+    _ = recorder.ingest(frame(elapsed: 601, distanceRaw: 100, steps: 1201, speedRaw: 30),
+                        now: t0.addingTimeInterval(800))
+    _ = recorder.ingest(frame(elapsed: 900, distanceRaw: 150, steps: 1800, speedRaw: 30),
+                        now: t0.addingTimeInterval(1100))
+    let second = try require(recorder.finish(now: t0.addingTimeInterval(1100)))
+    check(second.durationSeconds == 299, "second walk duration \(second.durationSeconds)")
+    check(abs(second.distanceKm - 0.50) < 0.0001, "second walk distance \(second.distanceKm)")
+    check(second.steps == 599, "second walk steps \(second.steps)")
+}
+
+/// When the belt resets its counters mid-stream, the open walk is closed with the old numbers.
+func recorderClosesSessionOnCounterReset() throws {
+    let recorder = SessionRecorder(idleTimeout: 600, minimumDuration: 30, minimumSteps: 20)
+    let t0 = Date(timeIntervalSince1970: 6_000_000)
+    _ = recorder.ingest(frame(elapsed: 0, distanceRaw: 0, steps: 0, speedRaw: 30), now: t0)
+    _ = recorder.ingest(frame(elapsed: 400, distanceRaw: 60, steps: 800, speedRaw: 30),
+                        now: t0.addingTimeInterval(400))
+    // Belt reset: counters go backwards.
+    let closed = try require(recorder.ingest(
+        frame(elapsed: 2, distanceRaw: 0, steps: 3, speedRaw: 30), now: t0.addingTimeInterval(500)))
+    check(closed.durationSeconds == 400, "duration \(closed.durationSeconds)")
+    check(closed.steps == 800, "steps \(closed.steps)")
+    // And a fresh walk is already open from the reset frame.
+    check(recorder.isRecording, "a new session should have opened")
+}
+
+/// A nudge of the belt is not a walk and must not litter the history.
+func recorderDiscardsTrivialWalks() throws {
+    let recorder = SessionRecorder(idleTimeout: 30, minimumDuration: 30, minimumSteps: 20)
+    let t0 = Date(timeIntervalSince1970: 7_000_000)
+    _ = recorder.ingest(frame(elapsed: 0, distanceRaw: 0, steps: 0, speedRaw: 20), now: t0)
+    _ = recorder.ingest(frame(elapsed: 5, distanceRaw: 1, steps: 6, speedRaw: 20),
+                        now: t0.addingTimeInterval(5))
+    check(recorder.finish(now: t0.addingTimeInterval(6)) == nil, "5s walk must be discarded")
+}
+
+private func session(_ day: String, km: Double, seconds: Int, steps: Int, kcal: Double = 100) -> WalkSession {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd HH:mm"
+    formatter.timeZone = TimeZone(identifier: "UTC")
+    let date = formatter.date(from: day)!
+    return WalkSession(
+        startedAt: date, endedAt: date.addingTimeInterval(Double(seconds)),
+        durationSeconds: seconds, distanceKm: km, steps: steps, kcal: kcal, peakSpeedKph: 5.5
+    )
+}
+
+private var utcCalendar: Calendar = {
+    var c = Calendar(identifier: .gregorian)
+    c.timeZone = TimeZone(identifier: "UTC")!
+    return c
+}()
+
+func statsTotalsAndAverages() throws {
+    let sessions = [
+        session("2026-08-10 08:00", km: 2.0, seconds: 1800, steps: 2500),
+        session("2026-08-10 18:00", km: 1.0, seconds: 900, steps: 1300),
+        session("2026-08-12 08:00", km: 3.0, seconds: 2700, steps: 3800),
+    ]
+    let totals = WalkStats.totals(sessions)
+    check(totals.sessionCount == 3)
+    check(totals.distanceKm == 6.0)
+    check(totals.durationSeconds == 5400)
+    check(totals.steps == 7600)
+    // 6 km in 1.5 h = 4 km/h.
+    check(abs(totals.averageSpeedKph - 4.0) < 0.0001, "avg \(totals.averageSpeedKph)")
+
+    // Two active days, so the per-day average divides by 2 — not by the 3 days spanned.
+    check(WalkStats.activePeriodCount(sessions, period: .day, calendar: utcCalendar) == 2)
+    let perDay = WalkStats.averagePerActivePeriod(sessions, period: .day, calendar: utcCalendar)
+    check(perDay.distanceKm == 3.0, "per-day distance \(perDay.distanceKm)")
+    check(perDay.durationSeconds == 2700, "per-day duration \(perDay.durationSeconds)")
+
+    // Both days fall in one month.
+    check(WalkStats.activePeriodCount(sessions, period: .month, calendar: utcCalendar) == 1)
+    let perMonth = WalkStats.averagePerActivePeriod(sessions, period: .month, calendar: utcCalendar)
+    check(perMonth.distanceKm == 6.0)
+
+    let best = try require(WalkStats.best(sessions, period: .day, calendar: utcCalendar))
+    check(best.totals.distanceKm == 3.0, "best day should be the 3 km one")
+}
+
+/// Charts must show the days you did not walk, not silently close the gap.
+func statsContinuousBucketsIncludeEmptyPeriods() throws {
+    let sessions = [
+        session("2026-08-10 08:00", km: 2.0, seconds: 1800, steps: 2500),
+        session("2026-08-12 08:00", km: 3.0, seconds: 2700, steps: 3800),
+    ]
+    let now = session("2026-08-12 12:00", km: 0, seconds: 0, steps: 0).startedAt
+    let buckets = WalkStats.continuousBuckets(
+        sessions, period: .day, count: 4, endingAt: now, calendar: utcCalendar)
+    check(buckets.count == 4, "expected 4 buckets, got \(buckets.count)")
+    check(buckets.map { $0.totals.distanceKm } == [0, 2.0, 0, 3.0],
+          "series \(buckets.map { $0.totals.distanceKm })")
+    // Oldest first, so a chart reads left to right.
+    check(buckets.first!.date < buckets.last!.date)
+}
+
+func statsDayStreak() throws {
+    let today = session("2026-08-12 08:00", km: 1, seconds: 600, steps: 900).startedAt
+    let threeInARow = [
+        session("2026-08-10 08:00", km: 1, seconds: 600, steps: 900),
+        session("2026-08-11 08:00", km: 1, seconds: 600, steps: 900),
+        session("2026-08-12 08:00", km: 1, seconds: 600, steps: 900),
+    ]
+    check(WalkStats.currentDayStreak(threeInARow, now: today, calendar: utcCalendar) == 3)
+
+    // A gap breaks it.
+    let withGap = [
+        session("2026-08-08 08:00", km: 1, seconds: 600, steps: 900),
+        session("2026-08-11 08:00", km: 1, seconds: 600, steps: 900),
+        session("2026-08-12 08:00", km: 1, seconds: 600, steps: 900),
+    ]
+    check(WalkStats.currentDayStreak(withGap, now: today, calendar: utcCalendar) == 2)
+
+    // Yesterday still counts, so the streak is not lost before today is over.
+    let endedYesterday = [session("2026-08-11 08:00", km: 1, seconds: 600, steps: 900)]
+    check(WalkStats.currentDayStreak(endedYesterday, now: today, calendar: utcCalendar) == 1)
+
+    // A stale streak does not.
+    let stale = [session("2026-08-01 08:00", km: 1, seconds: 600, steps: 900)]
+    check(WalkStats.currentDayStreak(stale, now: today, calendar: utcCalendar) == 0)
+    check(WalkStats.currentDayStreak([], now: today, calendar: utcCalendar) == 0)
+}
+
+func statsCsvExport() throws {
+    let sessions = [session("2026-08-10 08:00", km: 2.0, seconds: 1800, steps: 2500)]
+    let csv = WalkStats.csv(sessions)
+    let lines = csv.split(separator: "\n")
+    check(lines.count == 2, "header plus one row, got \(lines.count)")
+    check(lines[0].hasPrefix("started,ended,duration_seconds"))
+    check(lines[1].contains("1800"))
+    check(lines[1].contains("2.000"))
+    // Every row must have the same column count as the header.
+    check(lines[0].split(separator: ",", omittingEmptySubsequences: false).count
+          == lines[1].split(separator: ",", omittingEmptySubsequences: false).count)
+}
+
+func sessionDerivedFigures() throws {
+    let s = session("2026-08-10 08:00", km: 3.0, seconds: 3600, steps: 4000)
+    check(s.averageSpeedKph == 3.0, "3 km in an hour is 3 km/h")
+    check(abs(s.strideMetres - 0.75) < 0.0001, "stride \(s.strideMetres)")
+    let empty = WalkSession(startedAt: Date(), endedAt: Date(), durationSeconds: 0,
+                            distanceKm: 0, steps: 0, kcal: 0, peakSpeedKph: 0)
+    check(empty.averageSpeedKph == 0, "no divide-by-zero")
+    check(empty.strideMetres == 0)
+    check(WalkStats.totals([]).averageSpeedKph == 0)
+}
+
+/// The history must survive a real encode -> disk -> decode round trip, not just in memory.
+func sessionStoreRoundTripsThroughDisk() throws {
+    let temp = FileManager.default.temporaryDirectory
+        .appendingPathComponent("walkingpad-selftest-\(UInt32.random(in: 0...UInt32.max))")
+        .appendingPathComponent("sessions.json")
+    defer { try? FileManager.default.removeItem(at: temp.deletingLastPathComponent()) }
+
+    let store = SessionStore(fileURL: temp)
+    check(store.sessions.isEmpty, "a fresh store starts empty")
+    check(store.lastError == nil, "a missing file is not an error")
+
+    let a = session("2026-08-10 08:00", km: 2.0, seconds: 1800, steps: 2500)
+    let b = session("2026-08-11 09:30", km: 3.5, seconds: 2400, steps: 4100)
+    store.append(a)
+    store.append(b)
+    check(store.sessions.count == 2)
+    check(store.lastError == nil, "save reported: \(store.lastError ?? "")")
+    check(FileManager.default.fileExists(atPath: temp.path), "the file should exist on disk")
+
+    // A second store reading the same file must see exactly the same history.
+    let reopened = SessionStore(fileURL: temp)
+    check(reopened.sessions.count == 2, "reopened count \(reopened.sessions.count)")
+    check(reopened.lastError == nil, "reopen reported: \(reopened.lastError ?? "")")
+    check(Set(reopened.sessions.map(\.id)) == Set([a.id, b.id]), "ids must survive the round trip")
+    let restored = try require(reopened.sessions.first { $0.id == b.id })
+    check(restored.distanceKm == 3.5)
+    check(restored.steps == 4100)
+    check(restored.durationSeconds == 2400)
+    check(abs(restored.startedAt.timeIntervalSince(b.startedAt)) < 1, "dates must round trip")
+
+    // Newest first ordering, and deletion persists.
+    check(reopened.sessionsNewestFirst.first?.id == b.id, "newest first")
+    reopened.delete(a)
+    check(SessionStore(fileURL: temp).sessions.count == 1, "deletion must persist")
+
+    // Totals over the restored data agree with the originals.
+    check(WalkStats.totals(reopened.sessions).distanceKm == 3.5)
+}

@@ -104,7 +104,7 @@ public enum WalkPeriod: String, CaseIterable, Sendable {
         }
     }
 
-    var component: Calendar.Component {
+    public var component: Calendar.Component {
         switch self {
         case .day: return .day
         case .week: return .weekOfYear

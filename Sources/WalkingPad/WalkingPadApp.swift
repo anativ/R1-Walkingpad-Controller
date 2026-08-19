@@ -13,6 +13,11 @@ struct WalkingPadApp: App {
         }
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(after: .sidebar) {
+                HistoryWindowButton()
+                    .environmentObject(app)
+                Divider()
+            }
             CommandMenu("Belt") {
                 // Every belt command is gated on the connection: the in-window controls are
                 // disabled when there is no belt, and these shortcuts must match or they will
@@ -46,6 +51,13 @@ struct WalkingPadApp: App {
             }
         }
 
+        Window("History", id: "history") {
+            HistoryView()
+                .environmentObject(app)
+                .frame(minWidth: 620, minHeight: 560)
+        }
+        .defaultSize(width: 820, height: 760)
+
         Settings {
             SettingsView()
                 .environmentObject(app)
@@ -63,6 +75,16 @@ struct WalkingPadApp: App {
                 .environmentObject(app)
         }
         .menuBarExtraStyle(.menu)
+    }
+}
+
+/// Opens the History window. Split out so it can hold the `openWindow` environment action.
+private struct HistoryWindowButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Walk History") { openWindow(id: "history") }
+            .keyboardShortcut("y", modifiers: [.command])
     }
 }
 
@@ -110,6 +132,7 @@ private struct MenuBarContent: View {
         Button("Slower") { app.nudgeSpeed(by: -0.5) }
             .disabled(!app.isConnected)
         Divider()
+        HistoryWindowButton()
         Button("Open window") {
             NSApp.activate(ignoringOtherApps: true)
             NSApp.windows.first { $0.canBecomeKey }?.makeKeyAndOrderFront(nil)
