@@ -262,6 +262,22 @@ public final class PadController: NSObject, ObservableObject {
         scheduleDrain()
     }
 
+    /// Queue several frames that must reach the belt in order.
+    public func send(batch: [PadCommand]) {
+        guard state.isConnected else {
+            appendLog("Ignored \(batch.count) commands — not connected", .warning)
+            return
+        }
+        if let speed = batch.compactMap({ command -> UInt8? in
+            if case .setSpeed(let raw) = command { return raw }
+            return nil
+        }).last {
+            inFlightSpeedRaw = speed
+        }
+        queue.enqueue(batch: batch)
+        scheduleDrain()
+    }
+
     private func scheduleDrain() {
         guard !drainScheduled else { return }
         guard !queue.isEmpty else { return }
@@ -295,10 +311,22 @@ public final class PadController: NSObject, ObservableObject {
 
     // MARK: - Convenience API
 
-    /// Speed in km/h. Clamped by the caller's configured ceiling.
+    /// The fastest speed this controller will ever ask the belt for, whatever the caller passes.
+    ///
+    /// The app clamps to the user's own (lower) ceiling first, but this is the floor of the
+    /// safety story: a treadmill command must never escape a bounds check just because some other
+    /// entry point — `padctl speed 20`, a future caller — forgot to clamp.
+    public static let maxSafeSpeedKph: Double = 10.0
+
+    /// Speed in km/h, clamped to `maxSafeSpeedKph`.
     public func setSpeed(kph: Double) {
-        let raw = UInt8(max(0, min(255, (kph * 10).rounded())))
-        send(.setSpeed(raw))
+        send(.setSpeed(PadController.rawSpeed(kph)))
+    }
+
+    /// km/h to the protocol's 0.1 km/h units, hard-clamped.
+    public static func rawSpeed(_ kph: Double) -> UInt8 {
+        let safe = min(max(0, kph), maxSafeSpeedKph)
+        return UInt8(max(0, min(255, (safe * 10).rounded())))
     }
 
     public func stop() {
@@ -307,10 +335,10 @@ public final class PadController: NSObject, ObservableObject {
     }
 
     /// Belt only accepts app speed changes in manual mode, and must be woken from standby.
+    ///
+    /// The three frames go in as one batch so a second call cannot interleave and reorder them.
     public func startWalking(at kph: Double) {
-        send(.setMode(.manual))
-        send(.start)
-        setSpeed(kph: kph)
+        send(batch: [.setMode(.manual), .start, .setSpeed(PadController.rawSpeed(kph))])
     }
 
     public func setMode(_ mode: PadMode) { send(.setMode(mode)) }
@@ -439,6 +467,10 @@ extension PadController: CBCentralManagerDelegate {
         if wantsConnection {
             state = .scanning
             startScan(broad: false)
+        } else if case .notFound = state {
+            // We got here from abandonConnectAttempt/giveUpScanning, which already set the
+            // explanatory terminal state. Overwriting it with a bare "Not connected" would erase
+            // the reason the user needs to see.
         } else {
             state = .idle
         }

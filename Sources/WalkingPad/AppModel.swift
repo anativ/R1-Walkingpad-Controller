@@ -74,7 +74,13 @@ final class AppModel: ObservableObject {
             tracker.profile = newValue.profile
             // A Slider whose value sits outside its own range misbehaves, so follow the ceiling down.
             let ceiling = min(newValue.speedCeilingKph, AppSettings.hardMaxSpeedKph)
-            if desiredSpeedKph > ceiling { desiredSpeedKph = ceiling }
+            if desiredSpeedKph > ceiling {
+                desiredSpeedKph = ceiling
+                // The ceiling is a safety limit, so it has to reach a belt that is already moving —
+                // not just the on-screen number. Sent through the controller directly so that
+                // lowering the ceiling is not mistaken for the manual override that ends a program.
+                if !runner.isRunning { sendSpeedToBelt(ceiling, mayStartBelt: false) }
+            }
             // A running program must respect a ceiling the user lowers underneath it.
             runner.applyCeiling(SpeedProgram.raw(ceiling))
         }
@@ -212,11 +218,22 @@ final class AppModel: ObservableObject {
             return
         }
         desiredSpeedKph = speed
-        // A speed change on a stopped belt needs the belt started first.
+        sendSpeedToBelt(speed, mayStartBelt: true)
+    }
+
+    /// The single place that decides how a speed reaches the belt.
+    ///
+    /// - Parameter mayStartBelt: whether a stopped belt should be started to honour this speed.
+    ///   Only ever true for an explicit user action or a program that is genuinely beginning —
+    ///   never for a background correction, which must not start a treadmill nobody expects to move.
+    private func sendSpeedToBelt(_ kph: Double, mayStartBelt: Bool) {
+        guard isConnected else { return }
         if !isMoving {
-            controller.startWalking(at: speed)
+            guard mayStartBelt else { return }
+            // A speed change on a stopped belt needs the belt started first.
+            controller.startWalking(at: kph)
         } else {
-            controller.setSpeed(kph: speed)
+            controller.setSpeed(kph: kph)
         }
     }
 
@@ -258,12 +275,9 @@ final class AppModel: ObservableObject {
     private func applyProgramSpeed(_ kph: Double) {
         let speed = clamp(kph)
         desiredSpeedKph = speed
-        guard isConnected else { return }
-        if !isMoving {
-            controller.startWalking(at: speed)
-        } else {
-            controller.setSpeed(kph: speed)
-        }
+        // A paused program must never start the belt: it is paused precisely because the belt is
+        // idle, and the user did not ask for it to move.
+        sendSpeedToBelt(speed, mayStartBelt: !runner.isPaused)
     }
 
     /// Save the edited program over the stored copy with the same id, or add it if new.
@@ -290,6 +304,31 @@ final class AppModel: ObservableObject {
 
     func deleteProgram(_ saved: SpeedProgram) {
         savedPrograms.removeAll { $0.id == saved.id }
+    }
+
+    /// True when the program can actually be started right now.
+    var canStartProgram: Bool {
+        program.isValid && program.clamped(toCeilingRaw: SpeedProgram.raw(effectiveMaxSpeed)) != nil
+    }
+
+    /// A note when the app's speed ceiling gets in the program's way. The program is left exactly
+    /// as the user wrote it — silently rewriting their numbers would lose their intent — but the
+    /// consequence is spelled out rather than discovered when Start does nothing.
+    var programCeilingNote: String? {
+        guard program.isValid else { return nil }
+        let ceilingRaw = SpeedProgram.raw(effectiveMaxSpeed)
+        guard program.maxRaw > ceilingRaw else { return nil }
+        guard let fitted = program.clamped(toCeilingRaw: ceilingRaw) else {
+            return String(
+                format: "The app's speed ceiling (%.1f km/h) is below this program's range. "
+                    + "Raise it in Settings to run this program.",
+                effectiveMaxSpeed
+            )
+        }
+        return String(
+            format: "The app's speed ceiling (%.1f km/h) will limit this program to %.1f–%.1f km/h.",
+            effectiveMaxSpeed, fitted.minKph, fitted.maxKph
+        )
     }
 
     /// Whether the edited program differs from its saved counterpart.

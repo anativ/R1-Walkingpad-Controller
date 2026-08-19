@@ -83,12 +83,16 @@ public final class ProgramRunner: ObservableObject {
         onNote?(String(format: "Program limited to %.1f–%.1f km/h by the speed ceiling",
                        runnable.minKph, runnable.maxKph))
         // Pull the current step back into the new band, heading away from the boundary.
+        //
+        // While paused the belt is deliberately idle, so this must NOT command a speed: doing so
+        // would physically start a stopped treadmill as a side effect of a settings change.
+        // tick() re-asserts the speed on resume, so nothing is lost by staying quiet here.
         if state.raw > runnable.maxRaw {
             state = SpeedSequence.State(raw: runnable.maxRaw, ascending: false)
-            onSpeed?(currentKph)
+            if !isPaused { onSpeed?(currentKph) }
         } else if state.raw < runnable.minRaw {
             state = SpeedSequence.State(raw: runnable.minRaw, ascending: true)
-            onSpeed?(currentKph)
+            if !isPaused { onSpeed?(currentKph) }
         }
     }
 

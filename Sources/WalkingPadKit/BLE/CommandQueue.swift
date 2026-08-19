@@ -29,6 +29,27 @@ public struct CommandQueue: Equatable {
         }
     }
 
+    /// Enqueue several frames that must arrive in this order, as one unit.
+    ///
+    /// Enqueuing them one at a time is not equivalent. Coalescing only replaces a frame that is
+    /// still queued, so if the leading `mode` frame of an earlier batch has already been sent, a
+    /// second `mode` has nothing to replace and lands at the tail — leaving `start, speed, mode`,
+    /// which tells the belt to change speed before it is in manual mode. Replacing every
+    /// coalescable member first and then appending the batch keeps the order intact.
+    public mutating func enqueue(batch: [PadCommand]) {
+        guard !batch.isEmpty else { return }
+        let keys = Set(batch.compactMap(\.coalesceKey))
+        control.removeAll { command in
+            guard let key = command.coalesceKey else { return false }
+            return keys.contains(key)
+        }
+        for command in batch where command.isStatusPoll == false {
+            control.append(command)
+        }
+        // A poll inside a batch is meaningless; keep the newest one if present.
+        if let poll = batch.last(where: { $0.isStatusPoll }) { self.poll = poll }
+    }
+
     /// Next frame to write, control frames first.
     public mutating func dequeue() -> PadCommand? {
         if !control.isEmpty { return control.removeFirst() }

@@ -406,3 +406,84 @@ func loweringCeilingReclampsRunningProgram() throws {
     runner.applyCeiling(20)
     check(!runner.isRunning, "an impossible ceiling must stop the program")
 }
+
+// MARK: - Regressions for the audited safety and ordering bugs
+
+/// Lowering the ceiling while a program is PAUSED must not command a speed: that reached
+/// startWalking() and physically started a stopped treadmill from a settings change.
+func loweringCeilingWhilePausedCommandsNothing() throws {
+    let runner = ProgramRunner()
+    var applied: [Double] = []
+    runner.onSpeed = { applied.append($0) }
+    let t0 = Date(timeIntervalSince1970: 4_000_000)
+    runner.start(SpeedProgram.standard, ceilingRaw: 100, now: t0)
+
+    // Climb into the upper half of the band.
+    var now = t0
+    for _ in 0..<20 {
+        now = now.addingTimeInterval(120)
+        runner.tick(beltIsMoving: true, now: now)
+    }
+    let beforePause = applied.count
+    check(runner.currentKph > 4.5)
+
+    // Belt goes idle long enough to pause the program.
+    runner.tick(beltIsMoving: false, now: now.addingTimeInterval(1))
+    runner.tick(beltIsMoving: false, now: now.addingTimeInterval(30))
+    check(runner.isPaused, "program should be paused")
+    check(runner.isRunning, "a paused program is still running")
+
+    // Now lower the ceiling underneath the current step.
+    runner.applyCeiling(45)
+    check(applied.count == beforePause,
+          "applyCeiling must not command a speed while paused (would start a stopped belt)")
+    check(runner.currentKph <= 4.5, "the step must still be pulled into the new band")
+
+    // On resume it re-asserts the corrected speed, so nothing is lost.
+    runner.tick(beltIsMoving: true, now: now.addingTimeInterval(60))
+    check(applied.count == beforePause + 1, "resume should re-assert the speed exactly once")
+    check(applied.last! <= 4.5, "re-asserted speed must respect the new ceiling")
+}
+
+/// A second start sequence must not be able to reorder itself behind an in-flight one.
+/// Enqueued one-by-one this produced `start, speed, mode` — speed before manual mode.
+func startSequenceKeepsOrderAfterPartialDrain() throws {
+    var queue = CommandQueue()
+    let startBatch: [PadCommand] = [.setMode(.manual), .start, .setSpeed(25)]
+    queue.enqueue(batch: startBatch)
+
+    // The leading mode frame has already gone out to the belt.
+    check(queue.dequeue() == .setMode(.manual))
+
+    // Impatient second press, while start+speed are still queued.
+    queue.enqueue(batch: [.setMode(.manual), .start, .setSpeed(30)])
+
+    check(queue.dequeue() == .setMode(.manual), "mode must lead the new batch")
+    check(queue.dequeue() == .start, "start must precede the speed")
+    check(queue.dequeue() == .setSpeed(30), "newest speed last")
+    check(queue.dequeue() == nil, "nothing stale left behind")
+}
+
+/// Batching must still collapse repeats rather than growing without bound.
+func repeatedStartBatchesDoNotGrowQueue() throws {
+    var queue = CommandQueue()
+    for _ in 0..<5 {
+        queue.enqueue(batch: [.setMode(.manual), .start, .setSpeed(30)])
+    }
+    check(queue.controlCount == 3, "expected 3 frames, got \(queue.controlCount)")
+    check(queue.pendingControl == [.setMode(.manual), .start, .setSpeed(30)],
+          "order must survive repeats: \(queue.pendingControl)")
+}
+
+/// The controller clamps speed itself, so no entry point — padctl included — can ask the belt
+/// for more than the hardware maximum.
+func controllerClampsSpeedAtTheWire() throws {
+    check(PadController.rawSpeed(3.0) == 30)
+    check(PadController.rawSpeed(0) == 0)
+    check(PadController.rawSpeed(-5) == 0, "negative speed must clamp to zero")
+    check(PadController.rawSpeed(20) == UInt8(PadController.maxSafeSpeedKph * 10),
+          "20 km/h must clamp to the hardware maximum")
+    check(PadController.rawSpeed(.infinity) == UInt8(PadController.maxSafeSpeedKph * 10),
+          "a nonsense value must clamp, not trap")
+    check(PadController.maxSafeSpeedKph == 10.0)
+}

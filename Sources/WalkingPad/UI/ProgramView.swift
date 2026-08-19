@@ -11,6 +11,13 @@ struct ProgramView: View {
     /// 0.1 km/h, so offering 0.1 mph steps would promise a precision the hardware cannot honour.
     private static let programUnitLabel = "km/h"
 
+    /// The editor's upper bound. A saved program may exceed the current ceiling; a Slider whose
+    /// value sits outside its own range renders a pinned thumb and inert steppers, so the range
+    /// stretches to fit rather than silently rewriting what the user configured.
+    private var editorMaxSpeed: Double {
+        max(app.effectiveMaxSpeed, app.program.maxKph, 1.0)
+    }
+
     var body: some View {
         CardSection(
             title: "Program",
@@ -34,6 +41,11 @@ struct ProgramView: View {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundStyle(.orange)
+                } else if let note = app.programCeilingNote {
+                    Label(note, systemImage: "arrow.down.to.line.compact")
+                        .font(.caption)
+                        .foregroundStyle(app.canStartProgram ? Color.secondary : Color.orange)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 transportRow
             }
@@ -75,7 +87,7 @@ struct ProgramView: View {
             stepperRow(
                 "Minimum",
                 value: Binding(get: { app.program.minKph }, set: { app.program.minKph = $0 }),
-                range: 0.5...app.effectiveMaxSpeed,
+                range: 0.5...editorMaxSpeed,
                 step: 0.1,
                 format: "%.1f",
                 suffix: ProgramView.programUnitLabel,
@@ -84,7 +96,7 @@ struct ProgramView: View {
             stepperRow(
                 "Maximum",
                 value: Binding(get: { app.program.maxKph }, set: { app.program.maxKph = $0 }),
-                range: 0.5...app.effectiveMaxSpeed,
+                range: 0.5...editorMaxSpeed,
                 step: 0.1,
                 format: "%.1f",
                 suffix: ProgramView.programUnitLabel,
@@ -221,7 +233,7 @@ struct ProgramView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(app.isProgramRunning ? .red : .accentColor)
-            .disabled(!app.isConnected || (!app.isProgramRunning && !app.program.isValid))
+            .disabled(!app.isConnected || (!app.isProgramRunning && !app.canStartProgram))
 
             Button("Save") { app.saveProgram() }
                 .disabled(app.isProgramRunning || !app.program.isValid || !app.programHasUnsavedChanges)

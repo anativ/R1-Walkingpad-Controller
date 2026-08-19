@@ -33,7 +33,7 @@ struct WalkingPadApp: App {
                 Divider()
                 Button(app.isProgramRunning ? "Stop program" : "Start program") { app.toggleProgram() }
                     .keyboardShortcut("p", modifiers: [.command])
-                    .disabled(!app.isConnected || (!app.isProgramRunning && !app.program.isValid))
+                    .disabled(!app.isConnected || (!app.isProgramRunning && !app.canStartProgram))
                 Divider()
                 ForEach(PadMode.allCases, id: \.self) { mode in
                     Button("Mode: \(mode.label)") { app.setMode(mode) }

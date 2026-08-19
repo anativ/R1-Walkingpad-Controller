@@ -29,6 +29,10 @@ let allChecks: [(String, () throws -> Void)] = [
     ("runner pauses with belt, keeps schedule", runnerPausesWithBeltAndKeepsSchedule),
     ("runner does not drift on late ticks", runnerDoesNotDriftOnLateTicks),
     ("lowering ceiling reclamps running program", loweringCeilingReclampsRunningProgram),
+    ("lowering ceiling while paused commands nothing", loweringCeilingWhilePausedCommandsNothing),
+    ("start sequence keeps order after partial drain", startSequenceKeepsOrderAfterPartialDrain),
+    ("repeated start batches do not grow queue", repeatedStartBatchesDoNotGrowQueue),
+    ("controller clamps speed at the wire", controllerClampsSpeedAtTheWire),
 ]
 
 func usage() -> Never {
@@ -58,10 +62,14 @@ case "watch", "speed", "stop":
     let controller = PadController()
     var targetSpeed: Double?
     if command == "speed" {
-        guard arguments.count > 1, let kph = Double(arguments[1]) else {
+        guard arguments.count > 1, let kph = Double(arguments[1]), kph.isFinite else {
             print("speed needs a km/h value, e.g. padctl speed 3.5"); exit(2)
         }
-        targetSpeed = kph
+        let safe = min(max(0, kph), PadController.maxSafeSpeedKph)
+        if safe != kph {
+            print("note: \(kph) km/h is outside the belt's range — using \(safe) km/h")
+        }
+        targetSpeed = safe
     }
 
     var didAct = false
