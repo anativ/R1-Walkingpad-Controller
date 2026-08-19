@@ -42,6 +42,10 @@ let allChecks: [(String, () throws -> Void)] = [
     ("stats csv export", statsCsvExport),
     ("session derived figures", sessionDerivedFigures),
     ("session store round trips through disk", sessionStoreRoundTripsThroughDisk),
+    ("unreadable history is preserved, not overwritten", unreadableHistoryIsPreservedNotOverwritten),
+    ("history stays sorted on insert", historyStaysSortedOnInsert),
+    ("walk records the program that started it", walkRecordsTheProgramThatStartedIt),
+    ("unmovable unreadable history goes read-only", unmovableUnreadableHistoryGoesReadOnly),
 ]
 
 func usage() -> Never {

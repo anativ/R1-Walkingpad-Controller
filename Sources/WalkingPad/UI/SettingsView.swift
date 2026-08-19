@@ -30,6 +30,22 @@ struct AppPreferencesTab: View {
                     get: { app.settings.showMenuBarExtra },
                     set: { app.settings.showMenuBarExtra = $0 }
                 ))
+                Picker("Menu bar shows", selection: Binding(
+                    get: { app.settings.menuBarContent },
+                    set: { app.settings.menuBarContent = $0 }
+                )) {
+                    ForEach(MenuBarReadout.allCases) { Text($0.label).tag($0) }
+                }
+                .disabled(!app.settings.showMenuBarExtra)
+                Toggle("Menu bar only (hide Dock icon)", isOn: Binding(
+                    get: { app.settings.hideDockIcon },
+                    set: { app.settings.hideDockIcon = $0 }
+                ))
+                .disabled(!app.settings.showMenuBarExtra)
+                Text("The menu bar keeps showing live speed even when the window is closed or "
+                     + "minimised. With the Dock icon hidden, reopen the window from the menu bar item.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Control") {

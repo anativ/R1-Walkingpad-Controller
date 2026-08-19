@@ -35,6 +35,7 @@ struct DashboardView: View {
             .frame(maxWidth: .infinity)
         }
         .background(.background)
+        .task { app.reapplyDockIconPolicy() }
     }
 }
 

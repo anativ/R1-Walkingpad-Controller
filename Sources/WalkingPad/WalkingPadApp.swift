@@ -1,5 +1,6 @@
 import SwiftUI
 import WalkingPadKit
+import os
 
 @main
 struct WalkingPadApp: App {
@@ -64,6 +65,8 @@ struct WalkingPadApp: App {
         }
 
         // Live readout in the menu bar, so the numbers are visible without the window.
+        // Lives in the system menu bar, independent of any window: the speed stays visible while
+        // the window is minimised, closed, or hidden entirely with the Dock icon off.
         MenuBarExtra(isInserted: Binding(
             get: { app.settings.showMenuBarExtra },
             set: { app.settings.showMenuBarExtra = $0 }
@@ -78,6 +81,19 @@ struct WalkingPadApp: App {
     }
 }
 
+/// Reopens the dashboard. Needed because the window can be closed entirely while the app keeps
+/// running in the menu bar.
+private struct MainWindowButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Open WalkingPad Window") {
+            NSApp.activate(ignoringOtherApps: true)
+            openWindow(id: "main")
+        }
+    }
+}
+
 /// Opens the History window. Split out so it can hold the `openWindow` environment action.
 private struct HistoryWindowButton: View {
     @Environment(\.openWindow) private var openWindow
@@ -88,17 +104,26 @@ private struct HistoryWindowButton: View {
     }
 }
 
+/// The always-visible menu-bar readout.
+///
+/// This lives in the system menu bar, so it keeps showing the live speed whether the window is
+/// open, minimised, closed, or hidden entirely with the Dock icon turned off.
 private struct MenuBarLabel: View {
     @EnvironmentObject private var app: AppModel
 
+    private static let logger = Logger(subsystem: "io.nativ.walkingpad", category: "menubar")
+
     var body: some View {
-        if app.isMoving {
-            Text(String(format: "%.1f %@",
-                        app.settings.unit.speed(fromKph: app.beltSpeedKph),
-                        app.settings.unit.speedSuffix))
-        } else {
-            Image(systemName: "figure.walk.treadmill")
+        Group {
+            if let summary = app.menuBarSummary {
+                Label(summary, systemImage: app.isMoving ? "figure.walk.motion" : "figure.walk.treadmill")
+            } else {
+                Image(systemName: "figure.walk.treadmill")
+            }
         }
+        // Confirms the status item really was created; the only way to verify this without
+        // Screen Recording or Accessibility access.
+        .onAppear { MenuBarLabel.logger.notice("menu bar item created and rendering") }
     }
 }
 
@@ -133,10 +158,8 @@ private struct MenuBarContent: View {
             .disabled(!app.isConnected)
         Divider()
         HistoryWindowButton()
-        Button("Open window") {
-            NSApp.activate(ignoringOtherApps: true)
-            NSApp.windows.first { $0.canBecomeKey }?.makeKeyAndOrderFront(nil)
-        }
+        MainWindowButton()
+            .environmentObject(app)
         Button("Quit WalkingPad") { NSApp.terminate(nil) }
     }
 }

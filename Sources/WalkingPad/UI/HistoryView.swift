@@ -47,6 +47,53 @@ enum HistoryMetric: String, CaseIterable, Identifiable {
     }
 }
 
+/// Everything the History screen displays, derived once instead of on every render.
+///
+/// The app republishes on every belt status frame (~1 Hz while connected), and this screen would
+/// otherwise re-sort the whole history and rerun a dozen grouping passes every second just for
+/// being open.
+private struct HistorySnapshot {
+    var sessions: [WalkSession] = []
+    var lifetime = WalkTotals()
+    var buckets: [WalkBucket] = []
+    var averages: [(period: WalkPeriod, totals: WalkTotals, activeCount: Int)] = []
+    var streak = 0
+    var bestDay: WalkBucket?
+    var bestMonth: WalkBucket?
+    var longestWalk: Int?
+
+    static func make(
+        sessions: [WalkSession], lifetime: WalkTotals, period: WalkPeriod, bucketCount: Int, now: Date
+    ) -> HistorySnapshot {
+        var snapshot = HistorySnapshot()
+        snapshot.sessions = sessions
+        snapshot.lifetime = lifetime
+        snapshot.buckets = WalkStats.continuousBuckets(
+            sessions, period: period, count: bucketCount, endingAt: now
+        )
+        snapshot.averages = WalkPeriod.allCases.map { period in
+            let grouped = WalkStats.buckets(sessions, period: period)
+            return (
+                period,
+                WalkStats.averagePerActivePeriod(sessions, period: period),
+                grouped.count
+            )
+        }
+        snapshot.streak = WalkStats.currentDayStreak(sessions, now: now)
+        snapshot.bestDay = WalkStats.best(sessions, period: .day)
+        snapshot.bestMonth = WalkStats.best(sessions, period: .month)
+        snapshot.longestWalk = sessions.map(\.durationSeconds).max()
+        return snapshot
+    }
+}
+
+/// Identifies the inputs a snapshot depends on. When this changes, and only then, we recompute.
+private struct SnapshotKey: Equatable {
+    var revision: Int
+    var period: WalkPeriod
+    var day: Date
+}
+
 struct HistoryView: View {
     @EnvironmentObject private var app: AppModel
     @State private var period: WalkPeriod = .day
@@ -54,9 +101,22 @@ struct HistoryView: View {
     @State private var selection = Set<UUID>()
     @State private var isExporting = false
     @State private var confirmingDeleteAll = false
+    @State private var snapshot = HistorySnapshot()
+    /// Built when the user actually asks to export, not on every render.
+    @State private var exportText = ""
 
     private var unit: DistanceUnit { app.settings.unit }
-    private var sessions: [WalkSession] { app.sessions }
+    private var sessions: [WalkSession] { snapshot.sessions }
+
+    private var snapshotKey: SnapshotKey {
+        // The day is part of the key so a window left open overnight recomputes its buckets and
+        // streak against the new today rather than yesterday's.
+        SnapshotKey(
+            revision: app.store.revision,
+            period: period,
+            day: Calendar.current.startOfDay(for: Date())
+        )
+    }
 
     /// How many buckets to plot for each grouping.
     private var bucketCount: Int {
@@ -70,7 +130,29 @@ struct HistoryView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 14) {
-                if sessions.isEmpty {
+                // Shown above everything, and not gated on having any history: after a
+                // quarantine the history IS empty, which is exactly when this must be visible.
+                if let notice = app.store.quarantineNotice {
+                    Label(notice, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                }
+                if let error = app.store.lastError {
+                    Label(error, systemImage: "exclamationmark.circle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(.red.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                }
+                // Read the store directly here: the snapshot is empty until .task first runs,
+                // which would otherwise flash the empty state for a frame.
+                if app.store.sessions.isEmpty {
                     emptyState
                 } else {
                     lifetimeCard
@@ -86,9 +168,20 @@ struct HistoryView: View {
         }
         .background(.background)
         .navigationTitle("History")
+        // Runs outside body, so it can safely write state; re-runs only when the key changes.
+        .task(id: snapshotKey) {
+            snapshot = HistorySnapshot.make(
+                sessions: app.sessions,
+                lifetime: app.lifetimeTotals,
+                period: period,
+                bucketCount: bucketCount,
+                now: Date()
+            )
+        }
         .toolbar {
             if !sessions.isEmpty {
                 Button {
+                    exportText = app.historyCSV()
                     isExporting = true
                 } label: {
                     Label("Export CSV", systemImage: "square.and.arrow.up")
@@ -98,7 +191,7 @@ struct HistoryView: View {
         }
         .fileExporter(
             isPresented: $isExporting,
-            document: CSVDocument(text: app.historyCSV()),
+            document: CSVDocument(text: exportText),
             contentType: .commaSeparatedText,
             defaultFilename: "walkingpad-history"
         ) { _ in }
@@ -125,6 +218,7 @@ struct HistoryView: View {
     }
 
     private var lifetimeCard: some View {
+        // Deliberately live rather than snapshotted: this one is meant to tick up as you walk.
         let totals = app.lifetimeTotalsIncludingCurrent
         return CardSection(
             title: "All time",
@@ -183,9 +277,7 @@ struct HistoryView: View {
     }
 
     private var chartCard: some View {
-        let buckets = WalkStats.continuousBuckets(
-            sessions, period: period, count: bucketCount, endingAt: Date()
-        )
+        let buckets = snapshot.buckets
         return CardSection(
             title: "\(metric.label) per \(period.label.lowercased())",
             systemImage: "chart.bar.fill",
@@ -221,9 +313,10 @@ struct HistoryView: View {
     private var averagesCard: some View {
         CardSection(title: "Averages", systemImage: "chart.bar.doc.horizontal") {
             VStack(spacing: 8) {
-                ForEach(WalkPeriod.allCases, id: \.self) { period in
-                    let average = WalkStats.averagePerActivePeriod(sessions, period: period)
-                    let active = WalkStats.activePeriodCount(sessions, period: period)
+                ForEach(snapshot.averages, id: \.period) { entry in
+                    let period = entry.period
+                    let average = entry.totals
+                    let active = entry.activeCount
                     HStack {
                         Text(period.perLabel.capitalized)
                             .font(.callout.weight(.medium))
@@ -251,9 +344,9 @@ struct HistoryView: View {
     }
 
     private var activityCard: some View {
-        let streak = WalkStats.currentDayStreak(sessions, now: Date())
-        let bestDay = WalkStats.best(sessions, period: .day)
-        let bestWeek = WalkStats.best(sessions, period: .month)
+        let streak = snapshot.streak
+        let bestDay = snapshot.bestDay
+        let bestMonth = snapshot.bestMonth
         return CardSection(title: "Highlights", systemImage: "trophy") {
             HStack(spacing: 10) {
                 MetricTile(
@@ -273,15 +366,15 @@ struct HistoryView: View {
                 )
                 MetricTile(
                     label: "Best month",
-                    value: bestWeek.map { String(format: "%.1f", unit.distance(fromKm: $0.totals.distanceKm)) } ?? "—",
+                    value: bestMonth.map { String(format: "%.1f", unit.distance(fromKm: $0.totals.distanceKm)) } ?? "—",
                     unit: unit.distanceSuffix,
                     systemImage: "calendar",
                     tint: .cyan,
-                    footnote: bestWeek.map { $0.date.formatted(.dateTime.month(.wide).year()) }
+                    footnote: bestMonth.map { $0.date.formatted(.dateTime.month(.wide).year()) }
                 )
                 MetricTile(
                     label: "Longest walk",
-                    value: sessions.map(\.durationSeconds).max().map { Metrics.formatDuration($0) } ?? "—",
+                    value: snapshot.longestWalk.map { Metrics.formatDuration($0) } ?? "—",
                     systemImage: "hourglass",
                     tint: .brown
                 )
@@ -346,11 +439,7 @@ struct HistoryView: View {
             } message: {
                 Text("This removes all \(sessions.count) walks from this Mac. It cannot be undone.")
             }
-            if let error = app.store.lastError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
+
         }
     }
 }

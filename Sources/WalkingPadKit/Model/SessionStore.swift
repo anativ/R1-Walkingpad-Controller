@@ -7,9 +7,20 @@ import Foundation
 /// UserDefaults is the wrong home for a dataset. Writes are atomic, so a crash mid-save cannot
 /// truncate the history.
 public final class SessionStore: ObservableObject {
+    /// Newest first. Kept sorted on write so reading it is free, even on a long history.
     @Published public private(set) var sessions: [WalkSession] = []
     /// Set when the store could not read or write, for surfacing in the UI.
     @Published public private(set) var lastError: String?
+    /// Bumped on every change, so views can cache derived statistics against it.
+    @Published public private(set) var revision: Int = 0
+    /// Sticky notice about a history file that had to be set aside. Deliberately NOT cleared by a
+    /// later successful save: otherwise the first walk after a quarantine would erase the only
+    /// notification that the old history was archived, and the user would just see "no history".
+    @Published public private(set) var quarantineNotice: String?
+
+    /// Set when the history file could not be read AND could not be moved aside. While this is
+    /// true the store refuses to write, because overwriting would destroy data we cannot read.
+    public private(set) var isReadOnly = false
 
     private let fileURL: URL
 
@@ -28,28 +39,34 @@ public final class SessionStore: ObservableObject {
 
     public var storageLocation: URL { fileURL }
 
-    /// Newest first.
-    public var sessionsNewestFirst: [WalkSession] {
-        sessions.sorted { $0.startedAt > $1.startedAt }
-    }
+    /// Newest first. Already sorted, so this is O(1).
+    public var sessionsNewestFirst: [WalkSession] { sessions }
 
     public func append(_ session: WalkSession) {
-        sessions.append(session)
-        save()
+        // Insert in place rather than appending and re-sorting on every read.
+        let index = sessions.firstIndex { $0.startedAt <= session.startedAt } ?? sessions.count
+        sessions.insert(session, at: index)
+        didMutate()
     }
 
     public func delete(_ session: WalkSession) {
         sessions.removeAll { $0.id == session.id }
-        save()
+        didMutate()
     }
 
     public func delete(ids: Set<UUID>) {
         sessions.removeAll { ids.contains($0.id) }
-        save()
+        didMutate()
     }
 
     public func deleteAll() {
         sessions.removeAll()
+        didMutate()
+    }
+
+    /// Bump the revision first, so views recompute even if the write is refused or fails.
+    private func didMutate() {
+        revision += 1
         save()
     }
 
@@ -62,13 +79,42 @@ public final class SessionStore: ObservableObject {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             sessions = try decoder.decode([WalkSession].self, from: data)
+                .sorted { $0.startedAt > $1.startedAt }
         } catch {
-            // Never silently drop the user's history: keep the file, report the problem.
-            lastError = "Could not read walk history: \(error.localizedDescription)"
+            quarantineUnreadableFile(reason: error.localizedDescription)
+        }
+    }
+
+    /// An unreadable history file must survive.
+    ///
+    /// Starting empty and carrying on is not enough: the next completed walk would call `save()`
+    /// and atomically replace the file with a single entry, destroying everything it could not
+    /// parse. So the file is moved aside first, and if even that fails the store goes read-only
+    /// rather than overwrite data it cannot read.
+    private func quarantineUnreadableFile(reason: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        let backup = fileURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("sessions-unreadable-\(stamp).json")
+        do {
+            try FileManager.default.moveItem(at: fileURL, to: backup)
+            sessions = []
+            quarantineNotice = "The previous walk history could not be read (\(reason)). "
+                + "It was kept as \(backup.lastPathComponent) in the same folder, "
+                + "and a new history was started."
+        } catch {
+            isReadOnly = true
+            sessions = []
+            lastError = "Could not read walk history (\(reason)), and it could not be moved aside "
+                + "(\(error.localizedDescription)). No walks will be saved until "
+                + "\(fileURL.lastPathComponent) is repaired or removed, so the existing file stays intact."
         }
     }
 
     private func save() {
+        // Refuse to write over a history we failed to read and failed to preserve.
+        guard !isReadOnly else { return }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = .prettyPrinted
@@ -78,7 +124,7 @@ public final class SessionStore: ObservableObject {
             )
             let data = try encoder.encode(sessions)
             try data.write(to: fileURL, options: .atomic)
-            lastError = nil
+            if lastError != nil { lastError = nil }
         } catch {
             lastError = "Could not save walk history: \(error.localizedDescription)"
         }

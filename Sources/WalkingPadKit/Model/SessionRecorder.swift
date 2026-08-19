@@ -17,8 +17,12 @@ public final class SessionRecorder {
     public var minimumSteps: Int
     /// Body data for the calorie estimate.
     public var profile: UserProfile
-    /// Name of the program driving the belt, recorded with the session.
+    /// Name of the program driving the belt. Sampled once, when a walk begins: reading it at
+    /// completion would attribute the whole walk to whatever happened to be active at the final
+    /// frame — often nothing, if the program ended before the walk did.
     public var programName: String?
+
+    private var programAtStart: String?
 
     private struct Baseline {
         var elapsed: Int
@@ -90,6 +94,7 @@ public final class SessionRecorder {
                 startedAt = now
                 kcal = 0
                 peakSpeedKph = status.speedKph
+                programAtStart = programName
             }
         } else if baseline != nil, let idleSince = lastMovingAt,
                   now.timeIntervalSince(idleSince) >= idleTimeout {
@@ -122,7 +127,7 @@ public final class SessionRecorder {
             steps: steps,
             kcal: kcal,
             peakSpeedKph: peakSpeedKph,
-            programName: programName
+            programName: programAtStart
         )
     }
 
@@ -132,6 +137,7 @@ public final class SessionRecorder {
         lastMovingAt = nil
         kcal = 0
         peakSpeedKph = 0
+        programAtStart = nil
         // lastStatus is deliberately kept: it is the baseline reference for the next walk.
     }
 

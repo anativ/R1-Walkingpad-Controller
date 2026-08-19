@@ -716,3 +716,114 @@ func sessionStoreRoundTripsThroughDisk() throws {
     // Totals over the restored data agree with the originals.
     check(WalkStats.totals(reopened.sessions).distanceKm == 3.5)
 }
+
+/// An unreadable history file must never be overwritten by the next walk.
+/// Previously: load() failed, sessions went empty, and the next append() atomically replaced the
+/// whole file with a single entry — silent, total data loss.
+func unreadableHistoryIsPreservedNotOverwritten() throws {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("walkingpad-corrupt-\(UInt32.random(in: 0...UInt32.max))")
+    let file = dir.appendingPathComponent("sessions.json")
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+    // A file that is definitely not decodable as [WalkSession].
+    let garbage = "{ this is not json at all "
+    try Data(garbage.utf8).write(to: file)
+
+    let store = SessionStore(fileURL: file)
+    check(store.sessions.isEmpty, "an unreadable file yields an empty in-memory history")
+    check(store.quarantineNotice != nil, "the user must be told their history was set aside")
+    check(store.quarantineNotice?.contains("sessions-unreadable-") == true,
+          "the notice must name the preserved file so it can be found")
+
+    // The original bytes must still exist somewhere.
+    let files = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+    let preserved = files.filter { $0.hasPrefix("sessions-unreadable-") }
+    check(preserved.count == 1, "the unreadable file must be kept aside, found \(files)")
+    let keptURL = dir.appendingPathComponent(preserved[0])
+    check(try String(decoding: Data(contentsOf: keptURL), as: UTF8.self) == garbage,
+          "the preserved copy must be byte-identical")
+
+    // Now a new walk arrives: it must not disturb the preserved copy.
+    store.append(session("2026-08-12 08:00", km: 1.0, seconds: 600, steps: 900))
+    check(store.sessions.count == 1)
+    check(try String(decoding: Data(contentsOf: keptURL), as: UTF8.self) == garbage,
+          "appending must not touch the preserved copy")
+    check(SessionStore(fileURL: file).sessions.count == 1, "the new history reloads cleanly")
+    // The notice must survive the save, or the first walk after a quarantine silently erases the
+    // only sign that the old history was archived.
+    check(store.quarantineNotice != nil, "the notice must outlive the next successful save")
+}
+
+/// Sessions are kept newest-first as they are inserted, so reads do not re-sort the history.
+func historyStaysSortedOnInsert() throws {
+    let temp = FileManager.default.temporaryDirectory
+        .appendingPathComponent("walkingpad-sort-\(UInt32.random(in: 0...UInt32.max))")
+        .appendingPathComponent("sessions.json")
+    defer { try? FileManager.default.removeItem(at: temp.deletingLastPathComponent()) }
+    let store = SessionStore(fileURL: temp)
+
+    // Insert out of order.
+    store.append(session("2026-08-11 08:00", km: 1, seconds: 600, steps: 900))
+    store.append(session("2026-08-13 08:00", km: 1, seconds: 600, steps: 900))
+    store.append(session("2026-08-12 08:00", km: 1, seconds: 600, steps: 900))
+
+    let dates = store.sessionsNewestFirst.map(\.startedAt)
+    check(dates == dates.sorted(by: >), "history must be newest-first: \(dates)")
+    check(store.sessions.first?.startedAt == dates.max(), "newest session first")
+    check(store.revision >= 3, "each save should bump the revision for view caching")
+}
+
+/// A walk is attributed to the program that was driving when it STARTED, not whatever happens to
+/// be active as it closes.
+func walkRecordsTheProgramThatStartedIt() throws {
+    let recorder = SessionRecorder(idleTimeout: 30, minimumDuration: 30, minimumSteps: 20)
+    let t0 = Date(timeIntervalSince1970: 8_000_000)
+
+    recorder.programName = "Up / down"
+    _ = recorder.ingest(frame(elapsed: 0, distanceRaw: 0, steps: 0, speedRaw: 30), now: t0)
+    for i in 1...5 {
+        _ = recorder.ingest(
+            frame(elapsed: i * 60, distanceRaw: i * 10, steps: i * 120, speedRaw: 30),
+            now: t0.addingTimeInterval(Double(i * 60)))
+    }
+    // The program ends part-way through; the person keeps walking.
+    recorder.programName = nil
+    let walk = try require(recorder.finish(now: t0.addingTimeInterval(400)))
+    check(walk.programName == "Up / down",
+          "expected the starting program, got \(walk.programName ?? "nil")")
+}
+
+/// If an unreadable history cannot even be moved aside, the store must go read-only rather than
+/// overwrite bytes it could not parse. This is the safety-critical half of the quarantine fix.
+func unmovableUnreadableHistoryGoesReadOnly() throws {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("walkingpad-readonly-\(UInt32.random(in: 0...UInt32.max))")
+    let file = dir.appendingPathComponent("sessions.json")
+    defer {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
+        try? FileManager.default.removeItem(at: dir)
+    }
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let garbage = "definitely not json"
+    try Data(garbage.utf8).write(to: file)
+
+    // Make the directory unwritable so the quarantine rename cannot succeed.
+    try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+
+    let store = SessionStore(fileURL: file)
+    check(store.isReadOnly, "the store must refuse to write when it could not preserve the file")
+    check(store.lastError != nil, "the user must be told")
+    check(store.sessions.isEmpty)
+
+    // A completed walk must NOT be able to overwrite the unreadable file.
+    store.append(session("2026-08-12 08:00", km: 1.0, seconds: 600, steps: 900))
+    check(store.revision > 0, "a mutation must bump the revision even when the write is refused")
+    let onDisk = try String(decoding: Data(contentsOf: file), as: UTF8.self)
+    check(onDisk == garbage, "the original bytes must be intact, found: \(onDisk)")
+
+    // Restore permissions and confirm the file was never rewritten behind our back.
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
+    check(try String(decoding: Data(contentsOf: file), as: UTF8.self) == garbage)
+}

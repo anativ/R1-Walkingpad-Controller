@@ -1,9 +1,27 @@
+import AppKit
 import Combine
 import Foundation
 import SwiftUI
 import WalkingPadKit
 
 /// User-facing settings, persisted in UserDefaults.
+/// What the menu-bar item shows next to its icon.
+enum MenuBarReadout: String, CaseIterable, Identifiable {
+    case iconOnly, speed, speedAndDistance, speedAndTime, speedAndSteps
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .iconOnly: return "Icon only"
+        case .speed: return "Speed"
+        case .speedAndDistance: return "Speed and distance"
+        case .speedAndTime: return "Speed and time"
+        case .speedAndSteps: return "Speed and steps"
+        }
+    }
+}
+
 struct AppSettings: Equatable {
     var unit: DistanceUnit = .kilometers
     /// App-side speed ceiling for the slider. Independent of the belt's own max-speed setting.
@@ -14,6 +32,10 @@ struct AppSettings: Equatable {
     var heightCm: Double = 175
     var autoConnectOnLaunch: Bool = true
     var showMenuBarExtra: Bool = true
+    /// What the menu-bar item displays. Visible whether or not any window is open.
+    var menuBarContent: MenuBarReadout = .speed
+    /// Run as a menu-bar-only app: no Dock icon, no app switcher entry.
+    var hideDockIcon: Bool = false
 
     /// The R1 Pro tops out at 10 km/h; never let the UI ask for more than the hardware allows.
     static let hardMaxSpeedKph: Double = 10.0
@@ -69,12 +91,20 @@ final class AppModel: ObservableObject {
     var settings: AppSettings {
         get { storedSettings }
         set {
+            var newValue = newValue
+            // Hiding the Dock icon without a menu-bar item would leave a running app with no icon,
+            // no window and no menu to quit from — recoverable only via Force Quit.
+            if newValue.hideDockIcon { newValue.showMenuBarExtra = true }
             guard newValue != storedSettings else { return }
+            let oldValue = storedSettings
             objectWillChange.send()
             storedSettings = newValue
             persist()
             tracker.profile = newValue.profile
             recorder.profile = newValue.profile
+            if newValue.hideDockIcon != oldValue.hideDockIcon {
+                applyDockIconPolicy(hidden: newValue.hideDockIcon)
+            }
             // A Slider whose value sits outside its own range misbehaves, so follow the ceiling down.
             let ceiling = min(newValue.speedCeilingKph, AppSettings.hardMaxSpeedKph)
             if desiredSpeedKph > ceiling {
@@ -174,6 +204,8 @@ final class AppModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+
+        applyDockIconPolicy(hidden: loaded.hideDockIcon)
 
         if settings.autoConnectOnLaunch { controller.connect() }
     }
@@ -275,6 +307,39 @@ final class AppModel: ObservableObject {
     private func clamp(_ kph: Double) -> Double {
         let rounded = (kph * 10).rounded() / 10
         return min(max(0, rounded), effectiveMaxSpeed)
+    }
+
+    /// Switching to `.accessory` drops the Dock icon so the app lives only in the menu bar.
+    /// The menu-bar readout keeps updating either way — it does not depend on a window.
+    private func applyDockIconPolicy(hidden: Bool) {
+        NSApp?.setActivationPolicy(hidden ? .accessory : .regular)
+    }
+
+    /// Re-apply the saved Dock-icon preference. `AppModel` is built during scene setup, where
+    /// `NSApp` can still be nil, so the preference is applied again once a view is on screen.
+    func reapplyDockIconPolicy() {
+        applyDockIconPolicy(hidden: settings.hideDockIcon)
+    }
+
+    /// The one-line summary shown in the menu bar.
+    var menuBarSummary: String? {
+        guard settings.menuBarContent != .iconOnly else { return nil }
+        guard isConnected, let status = controller.status else { return nil }
+        let unit = settings.unit
+        let speed = String(format: "%.1f", unit.speed(fromKph: status.speedKph))
+        switch settings.menuBarContent {
+        case .iconOnly:
+            return nil
+        case .speed:
+            return "\(speed) \(unit.speedSuffix)"
+        case .speedAndDistance:
+            return String(format: "%@ · %.2f %@", speed,
+                          unit.distance(fromKm: status.distanceKm), unit.distanceSuffix)
+        case .speedAndTime:
+            return "\(speed) · \(Metrics.formatDuration(status.elapsed))"
+        case .speedAndSteps:
+            return "\(speed) · \(status.steps) steps"
+        }
     }
 
     // MARK: - Walk history
@@ -445,6 +510,8 @@ final class AppModel: ObservableObject {
         defaults.set(settings.heightCm, forKey: Keys.height)
         defaults.set(settings.autoConnectOnLaunch, forKey: Keys.autoConnect)
         defaults.set(settings.showMenuBarExtra, forKey: Keys.menuBar)
+        defaults.set(settings.menuBarContent.rawValue, forKey: Keys.menuBarContent)
+        defaults.set(settings.hideDockIcon, forKey: Keys.hideDockIcon)
     }
 
     private func persistPrograms() {
@@ -495,6 +562,13 @@ final class AppModel: ObservableObject {
         if defaults.object(forKey: Keys.menuBar) != nil {
             settings.showMenuBarExtra = defaults.bool(forKey: Keys.menuBar)
         }
+        if let raw = defaults.string(forKey: Keys.menuBarContent),
+           let content = MenuBarReadout(rawValue: raw) {
+            settings.menuBarContent = content
+        }
+        if defaults.object(forKey: Keys.hideDockIcon) != nil {
+            settings.hideDockIcon = defaults.bool(forKey: Keys.hideDockIcon)
+        }
         // Guard against nonsense persisted values.
         settings.speedCeilingKph = min(max(1, settings.speedCeilingKph), AppSettings.hardMaxSpeedKph)
         settings.startSpeedKph = min(max(0.5, settings.startSpeedKph), settings.speedCeilingKph)
@@ -511,6 +585,8 @@ final class AppModel: ObservableObject {
         static let height = "heightCm"
         static let autoConnect = "autoConnectOnLaunch"
         static let menuBar = "showMenuBarExtra"
+        static let menuBarContent = "menuBarContent"
+        static let hideDockIcon = "hideDockIcon"
         static let draftProgram = "draftProgram"
         static let savedPrograms = "savedPrograms"
     }
