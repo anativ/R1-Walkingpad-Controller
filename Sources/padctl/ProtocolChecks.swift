@@ -1014,3 +1014,43 @@ func presetsSuitTheCeilingInForce() throws {
     check(SpeedLimits.presets(forCeiling: 0.5).isEmpty,
           "no preset is valid below the belt's minimum")
 }
+
+/// Raising the ceiling again must restore the program's authored range, not leave it stuck where
+/// it was cut. Re-clamping the already-clamped copy loses the original band permanently.
+func raisingCeilingRestoresProgramRange() throws {
+    let runner = ProgramRunner()
+    var applied: [Double] = []
+    runner.onSpeed = { applied.append($0) }
+    let t0 = Date(timeIntervalSince1970: 9_000_000)
+
+    // Authored 4.0-8.0, started while the walking ceiling is 6.0.
+    var authored = SpeedProgram.standard
+    authored.maxRaw = 80
+    check(runner.start(authored, ceilingRaw: 60, now: t0))
+    var active = try require(runner.activeProgram)
+    check(active.maxRaw == 60, "should start clamped to the ceiling, got \(active.maxRaw)")
+
+    // Switching to Run lifts the ceiling to 10.0: the authored 8.0 should come back.
+    runner.applyCeiling(100)
+    active = try require(runner.activeProgram)
+    check(active.maxRaw == 80, "authored maximum must be restored, got \(active.maxRaw)")
+    check(active.minRaw == 40, "minimum unchanged")
+
+    // And back to Walk clamps it again, without corrupting the authored range.
+    runner.applyCeiling(60)
+    active = try require(runner.activeProgram)
+    check(active.maxRaw == 60, "should clamp again, got \(active.maxRaw)")
+    runner.applyCeiling(100)
+    check(try require(runner.activeProgram).maxRaw == 80,
+          "the authored range must survive repeated clamping")
+
+    // The program must never step outside the ceiling in force.
+    runner.applyCeiling(60)
+    var now = t0
+    for _ in 0..<40 {
+        now = now.addingTimeInterval(120)
+        runner.tick(beltIsMoving: true, now: now)
+        check(runner.currentKph <= 6.0, "stepped above the ceiling: \(runner.currentKph)")
+    }
+    check(applied.allSatisfy { $0 <= 6.0 }, "commanded above the ceiling: \(applied)")
+}

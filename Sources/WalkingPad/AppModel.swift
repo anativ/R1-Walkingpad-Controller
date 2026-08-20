@@ -172,9 +172,20 @@ final class AppModel: ObservableObject {
             }
             if !self.hasAlignedTargetWithBelt {
                 self.hasAlignedTargetWithBelt = true
+                let ceiling = self.effectiveMaxSpeed
                 self.desiredSpeedKph = status.isMoving
-                    ? status.speedKph
-                    : min(self.settings.startSpeedKph, self.effectiveMaxSpeed)
+                    ? min(status.speedKph, ceiling)
+                    : min(self.settings.startSpeedKph, ceiling)
+                // The belt can be found already running faster than the ceiling now in force —
+                // reconnecting after a dropout, or after leaving Run mode while disconnected.
+                // The ceiling has to reach the hardware, not just the on-screen number.
+                if status.isMoving, status.speedKph > ceiling {
+                    self.controller.appendLog(
+                        String(format: "Belt was above the %.1f km/h ceiling on connect — slowing it",
+                               ceiling), .warning
+                    )
+                    self.sendSpeedToBelt(ceiling, mayStartBelt: false)
+                }
             }
         }
 
@@ -673,8 +684,8 @@ final class AppModel: ObservableObject {
         guard program.maxRaw > ceilingRaw else { return nil }
         guard let fitted = program.clamped(toCeilingRaw: ceilingRaw) else {
             return String(
-                format: "The app's speed ceiling (%.1f km/h) is below this program's range. "
-                    + "Raise it in Settings to run this program.",
+                format: "The speed ceiling (%.1f km/h) is below this program's range. "
+                    + "Switch to Run, or raise the limit in Settings, to run this program.",
                 effectiveMaxSpeed
             )
         }

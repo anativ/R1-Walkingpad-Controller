@@ -67,6 +67,14 @@ struct AppPreferencesTab: View {
                             .frame(width: 78, alignment: .trailing)
                     }
                 }
+                if app.settings.isRunningMode {
+                    Text("Run mode is on, so the belt currently accepts up to "
+                         + String(format: "%.0f km/h", SpeedLimits.hardMaxKph)
+                         + ". This limit applies when you switch back to Walk.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 LabeledContent("Start speed") {
                     HStack {
                         Slider(

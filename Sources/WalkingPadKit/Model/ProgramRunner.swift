@@ -18,6 +18,9 @@ public final class ProgramRunner: ObservableObject {
     @Published public private(set) var isPaused = false
     /// The program actually running, already clamped to the app's ceiling.
     @Published public private(set) var activeProgram: SpeedProgram?
+    /// The program as the user wrote it. Kept so that raising the ceiling can restore the range
+    /// it was authored with — re-clamping the already-clamped copy would lose it permanently.
+    private var authoredProgram: SpeedProgram?
 
     /// Called when the program wants the belt at a new speed, in km/h.
     public var onSpeed: ((Double) -> Void)?
@@ -46,6 +49,7 @@ public final class ProgramRunner: ObservableObject {
                 runnable.minKph, runnable.maxKph
             ))
         }
+        authoredProgram = program
         activeProgram = runnable
         state = SpeedSequence.start(of: runnable)
         stepsApplied = 1
@@ -64,6 +68,7 @@ public final class ProgramRunner: ObservableObject {
         isPaused = false
         nextChangeAt = nil
         activeProgram = nil
+        authoredProgram = nil
         notMovingSince = nil
         if let reason { onNote?("Program stopped: \(reason)") } else { onNote?("Program stopped") }
     }
@@ -73,14 +78,16 @@ public final class ProgramRunner: ObservableObject {
     /// its old maximum while the belt silently clamped, so the displayed step and the belt's real
     /// speed would disagree.
     public func applyCeiling(_ ceilingRaw: Int) {
-        guard isRunning, let program = activeProgram else { return }
-        guard let runnable = program.clamped(toCeilingRaw: ceilingRaw) else {
+        guard isRunning, let authored = authoredProgram, let current = activeProgram else { return }
+        // Re-clamp the AUTHORED program, not the running (already clamped) one, so raising the
+        // ceiling widens the range back out instead of leaving it stuck where it was cut.
+        guard let runnable = authored.clamped(toCeilingRaw: ceilingRaw) else {
             stop(reason: "speed ceiling leaves no room for the program")
             return
         }
-        guard runnable != program else { return }
+        guard runnable != current else { return }
         activeProgram = runnable
-        onNote?(String(format: "Program limited to %.1f–%.1f km/h by the speed ceiling",
+        onNote?(String(format: "Program range now %.1f–%.1f km/h (speed ceiling)",
                        runnable.minKph, runnable.maxKph))
         // Pull the current step back into the new band, heading away from the boundary.
         //

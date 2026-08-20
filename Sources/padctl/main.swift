@@ -56,6 +56,7 @@ let allChecks: [(String, () throws -> Void)] = [
     ("quit stop timeout is bounded", quitStopTimeoutIsBounded),
     ("running mode unlocks the hardware maximum", runningModeUnlocksTheHardwareMaximum),
     ("presets suit the ceiling in force", presetsSuitTheCeilingInForce),
+    ("raising ceiling restores program range", raisingCeilingRestoresProgramRange),
 ]
 
 func usage() -> Never {
