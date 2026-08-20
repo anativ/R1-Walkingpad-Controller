@@ -928,3 +928,41 @@ func recalculatingHistoryAppliesNewBodyData() throws {
     check(abs(try require(SessionStore(fileURL: temp).sessions.first).kcal - expected) < 0.5,
           "the recalculated value must be saved")
 }
+
+// MARK: - Quit behaviour
+
+/// A quit must never be delayed or questioned over a belt that is not running.
+func quitIsNeverBlockedByAStillBelt() throws {
+    for behavior in QuitBehavior.allCases {
+        check(QuitPolicy.action(behavior: behavior, isConnected: false, beltIsMoving: false) == .quitNow,
+              "\(behavior) must quit immediately when disconnected")
+        check(QuitPolicy.action(behavior: behavior, isConnected: true, beltIsMoving: false) == .quitNow,
+              "\(behavior) must quit immediately when the belt is still")
+        // A stale "moving" flag with no connection must not hold the quit either.
+        check(QuitPolicy.action(behavior: behavior, isConnected: false, beltIsMoving: true) == .quitNow,
+              "\(behavior) must quit immediately when not connected")
+    }
+}
+
+/// With the belt genuinely running, each setting does what it says.
+func quitBehaviourAppliesToARunningBelt() throws {
+    check(QuitPolicy.action(behavior: .ask, isConnected: true, beltIsMoving: true) == .askUser)
+    check(QuitPolicy.action(behavior: .leaveRunning, isConnected: true, beltIsMoving: true) == .quitNow)
+    check(QuitPolicy.action(behavior: .stopBelt, isConnected: true, beltIsMoving: true) == .stopThenQuit)
+
+    // Asking is the default: quitting must not silently change what the hardware is doing.
+    check(QuitBehavior.allCases.first == .ask, "ask should lead the list of options")
+    check(QuitBehavior.allCases.count == 3)
+    for behavior in QuitBehavior.allCases {
+        check(!behavior.label.isEmpty && !behavior.detail.isEmpty,
+              "\(behavior) needs a label and an explanation")
+    }
+}
+
+/// The stop wait must be bounded: quitting can never hang on hardware that stopped answering.
+func quitStopTimeoutIsBounded() throws {
+    check(QuitPolicy.stopConfirmationTimeout > 1,
+          "must allow for the command queue's 0.7s spacing plus the belt's ramp down")
+    check(QuitPolicy.stopConfirmationTimeout <= 10,
+          "must not leave the user staring at an app that will not quit")
+}

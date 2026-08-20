@@ -2,15 +2,37 @@ import SwiftUI
 import WalkingPadKit
 import os
 
+/// Intercepts the quit so a moving belt can be dealt with first.
+///
+/// SwiftUI has no hook for this — `applicationShouldTerminate` is the only place AppKit lets you
+/// delay or veto a quit, which is what stopping the belt first requires.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Wired from the scenes below, because the model is owned by the App struct.
+    weak var model: AppModel?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // No model yet means nothing is connected, so never block the quit.
+        model?.handleQuitRequest() ?? .terminateNow
+    }
+
+    /// Closing the last window must not quit: the app lives on in the menu bar, still showing the
+    /// speed and still driving any running program.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+}
+
 @main
 struct WalkingPadApp: App {
     @StateObject private var app = AppModel()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
         Window("WalkingPad", id: "main") {
             DashboardView()
                 .environmentObject(app)
                 .frame(minWidth: 460, minHeight: 620)
+                .task { appDelegate.model = app }
         }
         .windowResizability(.contentMinSize)
         .commands {
@@ -76,6 +98,9 @@ struct WalkingPadApp: App {
         } label: {
             MenuBarLabel()
                 .environmentObject(app)
+                // Also wired here: with the window closed or the Dock icon hidden, this may be
+                // the only scene that ever appears.
+                .task { appDelegate.model = app }
         }
         .menuBarExtraStyle(.menu)
     }

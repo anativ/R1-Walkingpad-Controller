@@ -42,6 +42,8 @@ struct AppSettings: Equatable {
     var menuBarContent: MenuBarReadout = .speed
     /// Run as a menu-bar-only app: no Dock icon, no app switcher entry.
     var hideDockIcon: Bool = false
+    /// What to do about a moving belt when the app quits.
+    var quitBehavior: QuitBehavior = .ask
 
     /// The R1 Pro tops out at 10 km/h; never let the UI ask for more than the hardware allows.
     static let hardMaxSpeedKph: Double = 10.0
@@ -351,6 +353,89 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Quitting
+
+    private var quitStopTimer: Timer?
+
+    /// Decide what to do about a quit request. Called from the app delegate.
+    ///
+    /// Returning `.terminateLater` means we owe AppKit a `reply(toApplicationShouldTerminate:)`,
+    /// which every branch below guarantees — a quit must never hang waiting on hardware.
+    func handleQuitRequest() -> NSApplication.TerminateReply {
+        switch QuitPolicy.action(
+            behavior: settings.quitBehavior, isConnected: isConnected, beltIsMoving: isMoving
+        ) {
+        case .quitNow:
+            return .terminateNow
+        case .stopThenQuit:
+            beginStopThenQuit()
+            return .terminateLater
+        case .askUser:
+            switch presentQuitAlert() {
+            case .stopAndQuit:
+                beginStopThenQuit()
+                return .terminateLater
+            case .quitAnyway:
+                return .terminateNow
+            case .cancel:
+                return .terminateCancel
+            }
+        }
+    }
+
+    private enum QuitChoice { case stopAndQuit, quitAnyway, cancel }
+
+    private func presentQuitAlert() -> QuitChoice {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = String(
+            format: "The belt is still running at %.1f %@.",
+            settings.unit.speed(fromKph: beltSpeedKph), settings.unit.speedSuffix
+        )
+        alert.informativeText = isProgramRunning
+            ? "Quitting also ends the running program, so the belt will hold this speed instead of "
+                + "continuing to change."
+            : "Quitting does not stop the belt by itself."
+        alert.addButton(withTitle: "Stop Belt and Quit")
+        alert.addButton(withTitle: "Leave Running")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .stopAndQuit
+        case .alertSecondButtonReturn: return .quitAnyway
+        default: return .cancel
+        }
+    }
+
+    /// Send a stop and hold the quit until the belt confirms it, or the timeout expires.
+    private func beginStopThenQuit() {
+        runner.stop(reason: "quitting")
+        controller.stop()
+        controller.appendLog("Quitting — waiting for the belt to stop", .info)
+
+        let deadline = Date().addingTimeInterval(QuitPolicy.stopConfirmationTimeout)
+        quitStopTimer?.invalidate()
+        quitStopTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
+            guard let self else {
+                timer.invalidate()
+                NSApp.reply(toApplicationShouldTerminate: true)
+                return
+            }
+            // Losing the connection means we can no longer influence the belt; stop waiting.
+            let stopped = !self.isMoving || !self.isConnected
+            guard stopped || Date() >= deadline else { return }
+            timer.invalidate()
+            self.quitStopTimer = nil
+            if !stopped {
+                self.controller.appendLog(
+                    "Belt did not confirm the stop within "
+                    + "\(Int(QuitPolicy.stopConfirmationTimeout))s — quitting anyway", .warning
+                )
+            }
+            self.finishOpenWalk()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+    }
+
     // MARK: - Walk history
 
     /// Close and save the walk in progress, if there is one worth keeping.
@@ -558,6 +643,7 @@ final class AppModel: ObservableObject {
         defaults.set(settings.showMenuBarExtra, forKey: Keys.menuBar)
         defaults.set(settings.menuBarContent.rawValue, forKey: Keys.menuBarContent)
         defaults.set(settings.hideDockIcon, forKey: Keys.hideDockIcon)
+        defaults.set(settings.quitBehavior.rawValue, forKey: Keys.quitBehavior)
     }
 
     private func persistPrograms() {
@@ -627,6 +713,10 @@ final class AppModel: ObservableObject {
         if defaults.object(forKey: Keys.hideDockIcon) != nil {
             settings.hideDockIcon = defaults.bool(forKey: Keys.hideDockIcon)
         }
+        if let raw = defaults.string(forKey: Keys.quitBehavior),
+           let behavior = QuitBehavior(rawValue: raw) {
+            settings.quitBehavior = behavior
+        }
         // Guard against nonsense persisted values.
         settings.speedCeilingKph = min(max(1, settings.speedCeilingKph), AppSettings.hardMaxSpeedKph)
         settings.startSpeedKph = min(max(0.5, settings.startSpeedKph), settings.speedCeilingKph)
@@ -650,6 +740,7 @@ final class AppModel: ObservableObject {
         static let menuBar = "showMenuBarExtra"
         static let menuBarContent = "menuBarContent"
         static let hideDockIcon = "hideDockIcon"
+        static let quitBehavior = "quitBehavior"
         static let draftProgram = "draftProgram"
         static let savedPrograms = "savedPrograms"
     }

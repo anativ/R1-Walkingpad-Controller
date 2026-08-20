@@ -138,6 +138,33 @@ check pinning exactly that.
 Averages are taken over periods that *had* a walk, not over the whole calendar — "average per day"
 answers "on days I walked" rather than being diluted by rest days.
 
+## Quitting, and closing the window
+
+These are different, and the difference matters when a treadmill is involved.
+
+**Closing the window** (red X or ⌘W) changes nothing. The app keeps running in the menu bar, the
+speed readout keeps updating, a running program keeps stepping, and the walk keeps recording.
+
+**Quitting** (⌘Q) never stops the belt by itself — a remote going away does not change what the
+machine is doing. Settings › App › **When quitting** decides what happens when the belt is actually
+running:
+
+| Option | Behaviour |
+| --- | --- |
+| Ask me (default) | Confirms, showing the current speed: *Stop Belt and Quit* / *Leave Running* / *Cancel* |
+| Leave the belt running | Quits silently, belt keeps going |
+| Stop the belt | Sends a stop and waits for the belt to confirm before quitting |
+
+Stopping waits up to 6 seconds — enough for the command queue's spacing plus the belt's ramp down —
+and then quits regardless. A quit must never hang on hardware.
+
+Either way, quitting ends any running **program**, so the belt holds its last speed rather than
+continuing to change. The prompt says so when a program is active. The walk in progress is always
+saved first.
+
+None of this applies when the belt is already stopped or not connected: the quit is immediate, with
+no prompt.
+
 ## Calories
 
 The belt reports no calories at all, so the app estimates them from your body data in

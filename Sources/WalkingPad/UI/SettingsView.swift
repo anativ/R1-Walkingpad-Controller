@@ -130,6 +130,18 @@ struct AppPreferencesTab: View {
                     get: { app.settings.autoConnectOnLaunch },
                     set: { app.settings.autoConnectOnLaunch = $0 }
                 ))
+                Picker("When quitting", selection: Binding(
+                    get: { app.settings.quitBehavior },
+                    set: { app.settings.quitBehavior = $0 }
+                )) {
+                    ForEach(QuitBehavior.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                Text(app.settings.quitBehavior.detail
+                     + " Only applies while the belt is actually running; closing the window never "
+                     + "quits or stops anything.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Section("Body data (for the calorie estimate)") {

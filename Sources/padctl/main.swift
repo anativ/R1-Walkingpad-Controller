@@ -51,6 +51,9 @@ let allChecks: [(String, () throws -> Void)] = [
     ("net calories subtract resting metabolism", netCaloriesSubtractRestingMetabolism),
     ("weight unit conversion round trips", weightUnitConversionRoundTrips),
     ("recalculating history applies new body data", recalculatingHistoryAppliesNewBodyData),
+    ("quit is never blocked by a still belt", quitIsNeverBlockedByAStillBelt),
+    ("quit behaviour applies to a running belt", quitBehaviourAppliesToARunningBelt),
+    ("quit stop timeout is bounded", quitStopTimeoutIsBounded),
 ]
 
 func usage() -> Never {
