@@ -64,6 +64,30 @@ public final class SessionStore: ObservableObject {
         didMutate()
     }
 
+    /// Recompute stored (gross) calories for every walk from its duration and average speed,
+    /// using the given body data. Returns how many walks changed.
+    ///
+    /// A stored figure was integrated live against whatever body data was configured at the time,
+    /// so this is how a corrected weight reaches walks that are already recorded.
+    @discardableResult
+    public func recalculateCalories(profile: UserProfile) -> Int {
+        var changed = 0
+        for index in sessions.indices {
+            let session = sessions[index]
+            guard session.durationSeconds > 0 else { continue }
+            let minutes = Double(session.durationSeconds) / 60
+            let recomputed = Metrics.kcalPerMinute(
+                speedKph: session.averageSpeedKph, profile: profile
+            ) * minutes
+            if abs(recomputed - session.kcal) > 0.5 {
+                sessions[index].kcal = recomputed
+                changed += 1
+            }
+        }
+        if changed > 0 { didMutate() }
+        return changed
+    }
+
     /// Bump the revision first, so views recompute even if the write is refused or fails.
     private func didMutate() {
         revision += 1

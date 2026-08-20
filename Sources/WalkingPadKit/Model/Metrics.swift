@@ -1,13 +1,55 @@
 import Foundation
 
+/// Used by the resting-metabolism formula, which is defined in these terms.
+public enum BiologicalSex: String, CaseIterable, Sendable {
+    case male, female
+
+    public var label: String {
+        switch self {
+        case .male: return "Male"
+        case .female: return "Female"
+        }
+    }
+}
+
 /// Body data used for the calorie estimate. The belt itself never reports calories.
+///
+/// Weight dominates the result, height shapes the walking cost, and age plus sex are needed only
+/// for the resting-metabolism baseline used to convert gross calories into net.
 public struct UserProfile: Equatable, Sendable {
     public var weightKg: Double
     public var heightCm: Double
+    public var ageYears: Double
+    public var sex: BiologicalSex
 
-    public init(weightKg: Double = 75, heightCm: Double = 175) {
+    public init(
+        weightKg: Double = 75,
+        heightCm: Double = 175,
+        ageYears: Double = 35,
+        sex: BiologicalSex = .male
+    ) {
         self.weightKg = weightKg
         self.heightCm = heightCm
+        self.ageYears = ageYears
+        self.sex = sex
+    }
+}
+
+/// How weight is entered and displayed.
+public enum WeightUnit: String, CaseIterable, Sendable {
+    case kilograms, pounds
+
+    public var suffix: String { self == .kilograms ? "kg" : "lb" }
+    public var label: String { self == .kilograms ? "Kilograms" : "Pounds" }
+
+    private static let poundsPerKg = 2.2046226218
+
+    public func fromKilograms(_ kg: Double) -> Double {
+        self == .kilograms ? kg : kg * WeightUnit.poundsPerKg
+    }
+
+    public func toKilograms(_ value: Double) -> Double {
+        self == .kilograms ? value : value / WeightUnit.poundsPerKg
     }
 }
 
@@ -24,6 +66,30 @@ public enum Metrics {
     }
 
     /// Minutes per km. Returns nil when stopped.
+    /// Resting energy expenditure, kcal per minute, from the Mifflin-St Jeor equation.
+    ///
+    /// This is the baseline your body burns anyway. Subtracting it turns the gross figure into the
+    /// *extra* calories the walk cost, which is the honest number to compare against food.
+    public static func restingKcalPerMinute(profile: UserProfile) -> Double {
+        let base = 10 * profile.weightKg
+            + 6.25 * profile.heightCm
+            - 5 * profile.ageYears
+        let bmrPerDay = profile.sex == .male ? base + 5 : base - 161
+        return max(0, bmrPerDay) / (24 * 60)
+    }
+
+    /// Calories attributable to the walk itself, i.e. gross minus what resting would have cost.
+    public static func netKcalPerMinute(speedKph: Double, profile: UserProfile) -> Double {
+        max(0, kcalPerMinute(speedKph: speedKph, profile: profile)
+            - restingKcalPerMinute(profile: profile))
+    }
+
+    /// Convert a stored gross figure to net, given how long the walk lasted.
+    public static func netKcal(gross: Double, durationSeconds: Int, profile: UserProfile) -> Double {
+        let resting = restingKcalPerMinute(profile: profile) * (Double(durationSeconds) / 60)
+        return max(0, gross - resting)
+    }
+
     public static func pace(speedKph: Double) -> Double? {
         guard speedKph > 0.05 else { return nil }
         return 60.0 / speedKph

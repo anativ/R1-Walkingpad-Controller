@@ -827,3 +827,104 @@ func unmovableUnreadableHistoryGoesReadOnly() throws {
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
     check(try String(decoding: Data(contentsOf: file), as: UTF8.self) == garbage)
 }
+
+// MARK: - Body data and calorie accuracy
+
+/// Weight is what dominates the walking-calorie estimate, so it must actually move the number.
+func weightDrivesTheCalorieEstimate() throws {
+    let light = UserProfile(weightKg: 55, heightCm: 175)
+    let heavy = UserProfile(weightKg: 110, heightCm: 175)
+    let lightBurn = Metrics.kcalPerMinute(speedKph: 5, profile: light)
+    let heavyBurn = Metrics.kcalPerMinute(speedKph: 5, profile: heavy)
+    check(heavyBurn > lightBurn, "a heavier walker must burn more: \(heavyBurn) vs \(lightBurn)")
+    // The formula is linear in mass, so doubling weight doubles the figure.
+    check(abs(heavyBurn / lightBurn - 2.0) < 0.01,
+          "expected the ratio to track the weight ratio, got \(heavyBurn / lightBurn)")
+    // A plausible hour of walking should land in a sane range, not orders of magnitude out.
+    let perHour = Metrics.kcalPerMinute(speedKph: 5, profile: UserProfile(weightKg: 75)) * 60
+    check(perHour > 120 && perHour < 500, "an hour at 5 km/h should be plausible, got \(perHour)")
+}
+
+/// Mifflin-St Jeor, checked against its published form.
+func restingMetabolismMatchesMifflinStJeor() throws {
+    // Male, 80 kg, 180 cm, 30 y: 10*80 + 6.25*180 - 5*30 + 5 = 1780 kcal/day.
+    let male = UserProfile(weightKg: 80, heightCm: 180, ageYears: 30, sex: .male)
+    let malePerDay = Metrics.restingKcalPerMinute(profile: male) * 24 * 60
+    check(abs(malePerDay - 1780) < 0.5, "expected 1780 kcal/day, got \(malePerDay)")
+
+    // Female, same body: 1780 - 5 - 161 = 1614 kcal/day.
+    let female = UserProfile(weightKg: 80, heightCm: 180, ageYears: 30, sex: .female)
+    let femalePerDay = Metrics.restingKcalPerMinute(profile: female) * 24 * 60
+    check(abs(femalePerDay - 1614) < 0.5, "expected 1614 kcal/day, got \(femalePerDay)")
+
+    // Older means lower.
+    let older = UserProfile(weightKg: 80, heightCm: 180, ageYears: 60, sex: .male)
+    check(Metrics.restingKcalPerMinute(profile: older)
+          < Metrics.restingKcalPerMinute(profile: male), "age must lower resting burn")
+    // Never negative, even for nonsense input.
+    let absurd = UserProfile(weightKg: 25, heightCm: 100, ageYears: 100, sex: .female)
+    check(Metrics.restingKcalPerMinute(profile: absurd) >= 0, "resting burn must not go negative")
+}
+
+/// Net is gross minus what resting would have cost, and never negative.
+func netCaloriesSubtractRestingMetabolism() throws {
+    let profile = UserProfile(weightKg: 80, heightCm: 180, ageYears: 30, sex: .male)
+    let gross = Metrics.kcalPerMinute(speedKph: 5, profile: profile)
+    let net = Metrics.netKcalPerMinute(speedKph: 5, profile: profile)
+    let resting = Metrics.restingKcalPerMinute(profile: profile)
+    check(net < gross, "net must be below gross")
+    check(abs(net - (gross - resting)) < 0.0001, "net must be exactly gross minus resting")
+
+    // Over an hour of walking, converting a stored gross figure agrees with the per-minute maths.
+    let grossHour = gross * 60
+    let netHour = Metrics.netKcal(gross: grossHour, durationSeconds: 3600, profile: profile)
+    check(abs(netHour - net * 60) < 0.001, "stored-gross conversion must match, got \(netHour)")
+
+    // Standing still: resting exceeds the walking cost, and net floors at zero rather than going
+    // negative and reading as "you un-burned calories".
+    check(Metrics.netKcalPerMinute(speedKph: 0, profile: profile) == 0)
+    check(Metrics.netKcal(gross: 0, durationSeconds: 3600, profile: profile) == 0)
+}
+
+func weightUnitConversionRoundTrips() throws {
+    check(WeightUnit.kilograms.fromKilograms(80) == 80)
+    let pounds = WeightUnit.pounds.fromKilograms(80)
+    check(abs(pounds - 176.37) < 0.01, "80 kg is about 176.4 lb, got \(pounds)")
+    check(abs(WeightUnit.pounds.toKilograms(pounds) - 80) < 0.0001, "must round trip")
+    check(WeightUnit.pounds.suffix == "lb")
+    for kg in [25.0, 75.0, 250.0] {
+        let unit = WeightUnit.pounds
+        check(abs(unit.toKilograms(unit.fromKilograms(kg)) - kg) < 0.0001, "round trip \(kg)")
+    }
+}
+
+/// Correcting your weight later must be able to fix walks already recorded.
+func recalculatingHistoryAppliesNewBodyData() throws {
+    let temp = FileManager.default.temporaryDirectory
+        .appendingPathComponent("walkingpad-recalc-\(UInt32.random(in: 0...UInt32.max))")
+        .appendingPathComponent("sessions.json")
+    defer { try? FileManager.default.removeItem(at: temp.deletingLastPathComponent()) }
+
+    let store = SessionStore(fileURL: temp)
+    // One hour, 5 km -> 5 km/h average. Calories recorded against a 60 kg profile.
+    var walk = session("2026-08-12 08:00", km: 5.0, seconds: 3600, steps: 6000)
+    walk.kcal = Metrics.kcalPerMinute(speedKph: 5, profile: UserProfile(weightKg: 60)) * 60
+    store.append(walk)
+    let before = try require(store.sessions.first).kcal
+
+    // The user corrects their weight upward.
+    let changed = store.recalculateCalories(profile: UserProfile(weightKg: 100, heightCm: 175))
+    check(changed == 1, "one walk should have been updated, got \(changed)")
+    let after = try require(store.sessions.first).kcal
+    check(after > before, "a heavier profile must raise the figure: \(after) vs \(before)")
+    let expected = Metrics.kcalPerMinute(
+        speedKph: 5, profile: UserProfile(weightKg: 100, heightCm: 175)) * 60
+    check(abs(after - expected) < 0.5, "expected \(expected), got \(after)")
+
+    // Running it again with the same body data changes nothing.
+    check(store.recalculateCalories(profile: UserProfile(weightKg: 100, heightCm: 175)) == 0,
+          "a second pass must be a no-op")
+    // And it persisted.
+    check(abs(try require(SessionStore(fileURL: temp).sessions.first).kcal - expected) < 0.5,
+          "the recalculated value must be saved")
+}

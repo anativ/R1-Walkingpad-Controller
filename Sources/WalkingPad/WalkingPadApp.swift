@@ -143,7 +143,7 @@ private struct MenuBarContent: View {
             Text(String(format: "%.2f %@ · %.0f kcal",
                         app.settings.unit.distance(fromKm: status.distanceKm),
                         app.settings.unit.distanceSuffix,
-                        app.tracker.kcal))
+                        app.sessionKcal))
         } else {
             Text(app.controller.state.label)
         }

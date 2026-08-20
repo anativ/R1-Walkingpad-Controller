@@ -260,11 +260,11 @@ struct HistoryView: View {
                 )
                 MetricTile(
                     label: "Calories",
-                    value: String(format: "%.0f", totals.kcal),
+                    value: String(format: "%.0f", app.displayKcal(for: totals)),
                     unit: "kcal",
                     systemImage: "flame.fill",
                     tint: .orange,
-                    footnote: "estimated"
+                    footnote: app.kcalFootnote
                 )
                 MetricTile(
                     label: "Walks",
@@ -300,7 +300,12 @@ struct HistoryView: View {
             Chart(buckets) { bucket in
                 BarMark(
                     x: .value(period.label, bucket.date, unit: period.component),
-                    y: .value(metric.label, metric.value(bucket.totals, unit: unit))
+                    y: .value(
+                        metric.label,
+                        metric == .calories
+                            ? app.displayKcal(for: bucket.totals)
+                            : metric.value(bucket.totals, unit: unit)
+                    )
                 )
                 .foregroundStyle(metric.tint.gradient)
                 .cornerRadius(3)
@@ -423,7 +428,7 @@ struct HistoryView: View {
                         .monospacedDigit()
                 }
                 TableColumn("kcal") { session in
-                    Text(String(format: "%.0f", session.kcal)).monospacedDigit()
+                    Text(String(format: "%.0f", app.displayKcal(for: session))).monospacedDigit()
                 }
                 TableColumn("Program") { session in
                     Text(session.programName ?? "—").foregroundStyle(.secondary)

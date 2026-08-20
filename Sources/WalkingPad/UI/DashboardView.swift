@@ -166,11 +166,11 @@ struct MetricsGrid: View {
             )
             MetricTile(
                 label: "Calories",
-                value: String(format: "%.0f", app.tracker.kcal),
+                value: String(format: "%.0f", app.sessionKcal),
                 unit: "kcal",
                 systemImage: "flame.fill",
                 tint: .orange,
-                footnote: "estimated"
+                footnote: app.kcalFootnote
             )
             MetricTile(
                 label: "Pace",

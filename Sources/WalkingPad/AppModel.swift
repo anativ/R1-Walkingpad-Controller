@@ -30,6 +30,12 @@ struct AppSettings: Equatable {
     var startSpeedKph: Double = 2.5
     var weightKg: Double = 75
     var heightCm: Double = 175
+    var ageYears: Double = 35
+    var sex: BiologicalSex = .male
+    /// How weight is entered and shown. Stored value is always kilograms.
+    var weightUnit: WeightUnit = .kilograms
+    /// Show calories net of resting metabolism — the extra the walk actually cost.
+    var showNetCalories: Bool = false
     var autoConnectOnLaunch: Bool = true
     var showMenuBarExtra: Bool = true
     /// What the menu-bar item displays. Visible whether or not any window is open.
@@ -41,7 +47,9 @@ struct AppSettings: Equatable {
     static let hardMaxSpeedKph: Double = 10.0
     static let minRunningSpeedKph: Double = 0.5
 
-    var profile: UserProfile { UserProfile(weightKg: weightKg, heightCm: heightCm) }
+    var profile: UserProfile {
+        UserProfile(weightKg: weightKg, heightCm: heightCm, ageYears: ageYears, sex: sex)
+    }
 }
 
 /// Owns the BLE controller, the derived-metrics tracker, and user intent.
@@ -372,6 +380,39 @@ final class AppModel: ObservableObject {
 
     var isRecordingWalk: Bool { recorder.isRecording }
 
+    /// The calorie figure to display for a stored walk, honouring the net/gross preference.
+    func displayKcal(gross: Double, durationSeconds: Int) -> Double {
+        guard settings.showNetCalories else { return gross }
+        return Metrics.netKcal(
+            gross: gross, durationSeconds: durationSeconds, profile: settings.profile
+        )
+    }
+
+    func displayKcal(for session: WalkSession) -> Double {
+        displayKcal(gross: session.kcal, durationSeconds: session.durationSeconds)
+    }
+
+    func displayKcal(for totals: WalkTotals) -> Double {
+        displayKcal(gross: totals.kcal, durationSeconds: totals.durationSeconds)
+    }
+
+    /// Live session calories, net or gross.
+    var sessionKcal: Double {
+        displayKcal(gross: tracker.kcal, durationSeconds: status?.elapsed ?? 0)
+    }
+
+    /// Label clarifying which figure is on screen.
+    var kcalFootnote: String { settings.showNetCalories ? "net, estimated" : "estimated" }
+
+    /// Recompute every stored walk's calories using the current body data.
+    ///
+    /// Stored calories are integrated live against the body data of the day, so correcting your
+    /// weight later would otherwise only affect future walks and leave the history inconsistent.
+    @discardableResult
+    func recalculateHistoryCalories() -> Int {
+        store.recalculateCalories(profile: settings.profile)
+    }
+
     func deleteSession(_ session: WalkSession) { store.delete(session) }
     func deleteSessions(ids: Set<UUID>) { store.delete(ids: ids) }
 
@@ -509,6 +550,10 @@ final class AppModel: ObservableObject {
         defaults.set(settings.startSpeedKph, forKey: Keys.startSpeed)
         defaults.set(settings.weightKg, forKey: Keys.weight)
         defaults.set(settings.heightCm, forKey: Keys.height)
+        defaults.set(settings.ageYears, forKey: Keys.age)
+        defaults.set(settings.sex.rawValue, forKey: Keys.sex)
+        defaults.set(settings.weightUnit.rawValue, forKey: Keys.weightUnit)
+        defaults.set(settings.showNetCalories, forKey: Keys.netCalories)
         defaults.set(settings.autoConnectOnLaunch, forKey: Keys.autoConnect)
         defaults.set(settings.showMenuBarExtra, forKey: Keys.menuBar)
         defaults.set(settings.menuBarContent.rawValue, forKey: Keys.menuBarContent)
@@ -557,6 +602,18 @@ final class AppModel: ObservableObject {
         if defaults.object(forKey: Keys.height) != nil {
             settings.heightCm = defaults.double(forKey: Keys.height)
         }
+        if defaults.object(forKey: Keys.age) != nil {
+            settings.ageYears = defaults.double(forKey: Keys.age)
+        }
+        if let raw = defaults.string(forKey: Keys.sex), let sex = BiologicalSex(rawValue: raw) {
+            settings.sex = sex
+        }
+        if let raw = defaults.string(forKey: Keys.weightUnit), let unit = WeightUnit(rawValue: raw) {
+            settings.weightUnit = unit
+        }
+        if defaults.object(forKey: Keys.netCalories) != nil {
+            settings.showNetCalories = defaults.bool(forKey: Keys.netCalories)
+        }
         if defaults.object(forKey: Keys.autoConnect) != nil {
             settings.autoConnectOnLaunch = defaults.bool(forKey: Keys.autoConnect)
         }
@@ -575,6 +632,7 @@ final class AppModel: ObservableObject {
         settings.startSpeedKph = min(max(0.5, settings.startSpeedKph), settings.speedCeilingKph)
         settings.weightKg = min(max(25, settings.weightKg), 250)
         settings.heightCm = min(max(100, settings.heightCm), 230)
+        settings.ageYears = min(max(10, settings.ageYears), 100)
         return settings
     }
 
@@ -584,6 +642,10 @@ final class AppModel: ObservableObject {
         static let startSpeed = "startSpeedKph"
         static let weight = "weightKg"
         static let height = "heightCm"
+        static let age = "ageYears"
+        static let sex = "biologicalSex"
+        static let weightUnit = "weightUnit"
+        static let netCalories = "showNetCalories"
         static let autoConnect = "autoConnectOnLaunch"
         static let menuBar = "showMenuBarExtra"
         static let menuBarContent = "menuBarContent"

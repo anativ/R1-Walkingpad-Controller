@@ -13,6 +13,8 @@ Everything the belt reports, plus what can be derived from it:
 Plus a full walk history: every session saved automatically, with per-day/week/month stats,
 charts and CSV export — see [History](#history).
 
+Calorie estimates use your own body data — see [Calories](#calories).
+
 | From the belt | Derived in the app |
 | --- | --- |
 | Current speed, belt state, mode | Pace (min/km or min/mi) |
@@ -135,6 +137,32 @@ check pinning exactly that.
 
 Averages are taken over periods that *had* a walk, not over the whole calendar — "average per day"
 answers "on days I walked" rather than being diluted by rest days.
+
+## Calories
+
+The belt reports no calories at all, so the app estimates them from your body data in
+Settings › App › **Body data**. Every field can be typed directly or stepped:
+
+| Field | Affects |
+| --- | --- |
+| Weight (kg or lb) | The walking cost itself — this is the number that matters most |
+| Height | The walking cost, via the ACSM equation |
+| Age, Sex | Only the resting-metabolism baseline, so only the net figure |
+
+**Gross vs net.** Gross counts everything burned while walking, including what you would have burned
+sitting still. Net subtracts resting metabolism (Mifflin-St Jeor) and is the extra the walk actually
+cost you — the honest number to compare against food. Toggle **Show net calories** to switch; every
+display follows it, and the tile says which one you are looking at.
+
+The stored figure is always gross, integrated against the belt's own clock while you walk, so
+switching to net never loses data — it is derived on the fly.
+
+**Correcting your weight later.** Stored calories were computed against whatever body data was set at
+the time, so fixing your weight afterwards would otherwise only affect future walks. **Recalculate
+calories** in the same settings section recomputes every recorded walk from its duration and average
+speed using your current body data, and tells you how many changed.
+
+These are estimates from a published formula, not measurements. Treat them as indicative.
 
 ## Build and run
 

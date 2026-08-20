@@ -46,6 +46,11 @@ let allChecks: [(String, () throws -> Void)] = [
     ("history stays sorted on insert", historyStaysSortedOnInsert),
     ("walk records the program that started it", walkRecordsTheProgramThatStartedIt),
     ("unmovable unreadable history goes read-only", unmovableUnreadableHistoryGoesReadOnly),
+    ("weight drives the calorie estimate", weightDrivesTheCalorieEstimate),
+    ("resting metabolism matches Mifflin-St Jeor", restingMetabolismMatchesMifflinStJeor),
+    ("net calories subtract resting metabolism", netCaloriesSubtractRestingMetabolism),
+    ("weight unit conversion round trips", weightUnitConversionRoundTrips),
+    ("recalculating history applies new body data", recalculatingHistoryAppliesNewBodyData),
 ]
 
 func usage() -> Never {

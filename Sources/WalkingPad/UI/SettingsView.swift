@@ -16,6 +16,53 @@ struct SettingsView: View {
 
 struct AppPreferencesTab: View {
     @EnvironmentObject private var app: AppModel
+    @State private var recalculated: Int?
+
+    /// Spells out what the calorie number actually is, rather than asking you to trust it.
+    private var explainer: String {
+        let restingPerHour = Metrics.restingKcalPerMinute(profile: app.settings.profile) * 60
+        let base = "Walking cost uses the ACSM walking equation, driven mainly by your weight. "
+        if app.settings.showNetCalories {
+            return base + String(
+                format: "Net subtracts resting metabolism (Mifflin-St Jeor, about %.0f kcal/hour "
+                    + "for this body data), leaving the extra the walk actually cost.",
+                restingPerHour
+            )
+        }
+        return base + "Gross counts everything burned while walking, including what you would have "
+            + "burned at rest anyway. Age and sex only affect the net figure."
+    }
+
+    /// A typed field plus a stepper — the previous controls could only be nudged one unit at a time.
+    private func numberRow(
+        _ title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        suffix: String
+    ) -> some View {
+        LabeledContent(title) {
+            HStack(spacing: 6) {
+                TextField(
+                    title,
+                    value: Binding(
+                        get: { value.wrappedValue },
+                        // Clamp on commit so a typo cannot push the model out of range.
+                        set: { value.wrappedValue = min(max(range.lowerBound, $0), range.upperBound) }
+                    ),
+                    format: .number.precision(.fractionLength(0))
+                )
+                .labelsHidden()
+                .frame(width: 64)
+                .multilineTextAlignment(.trailing)
+                Text(suffix)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .leading)
+                Stepper(title, value: value, in: range, step: 1)
+                    .labelsHidden()
+            }
+        }
+    }
 
     var body: some View {
         Form {
@@ -86,37 +133,68 @@ struct AppPreferencesTab: View {
             }
 
             Section("Body data (for the calorie estimate)") {
-                LabeledContent("Weight") {
-                    HStack {
-                        Stepper(
-                            value: Binding(
-                                get: { app.settings.weightKg },
-                                set: { app.settings.weightKg = $0 }
-                            ),
-                            in: 25...250, step: 1
-                        ) { EmptyView() }
-                        Text(String(format: "%.0f kg", app.settings.weightKg))
-                            .monospacedDigit()
-                            .frame(width: 60, alignment: .trailing)
-                    }
+                Picker("Weight in", selection: Binding(
+                    get: { app.settings.weightUnit },
+                    set: { app.settings.weightUnit = $0 }
+                )) {
+                    ForEach(WeightUnit.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
-                LabeledContent("Height") {
-                    HStack {
-                        Stepper(
-                            value: Binding(
-                                get: { app.settings.heightCm },
-                                set: { app.settings.heightCm = $0 }
-                            ),
-                            in: 100...230, step: 1
-                        ) { EmptyView() }
-                        Text(String(format: "%.0f cm", app.settings.heightCm))
-                            .monospacedDigit()
-                            .frame(width: 60, alignment: .trailing)
-                    }
+                numberRow(
+                    "Weight",
+                    value: Binding(
+                        get: { app.settings.weightUnit.fromKilograms(app.settings.weightKg) },
+                        set: { app.settings.weightKg = app.settings.weightUnit.toKilograms($0) }
+                    ),
+                    range: app.settings.weightUnit == .kilograms ? 25...250 : 55...550,
+                    suffix: app.settings.weightUnit.suffix
+                )
+                numberRow(
+                    "Height",
+                    value: Binding(
+                        get: { app.settings.heightCm },
+                        set: { app.settings.heightCm = $0 }
+                    ),
+                    range: 100...230,
+                    suffix: "cm"
+                )
+                numberRow(
+                    "Age",
+                    value: Binding(
+                        get: { app.settings.ageYears },
+                        set: { app.settings.ageYears = $0 }
+                    ),
+                    range: 10...100,
+                    suffix: "years"
+                )
+                Picker("Sex", selection: Binding(
+                    get: { app.settings.sex },
+                    set: { app.settings.sex = $0 }
+                )) {
+                    ForEach(BiologicalSex.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
-                Text("Calories are computed with the ACSM walking equation — the belt does not report them.")
+                Toggle("Show net calories", isOn: Binding(
+                    get: { app.settings.showNetCalories },
+                    set: { app.settings.showNetCalories = $0 }
+                ))
+                Text(explainer)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                LabeledContent("Past walks") {
+                    HStack {
+                        Button("Recalculate calories") {
+                            recalculated = app.recalculateHistoryCalories()
+                        }
+                        .disabled(app.sessions.isEmpty)
+                        if let recalculated {
+                            Text(recalculated == 0
+                                 ? "already up to date"
+                                 : "updated \(recalculated) walk\(recalculated == 1 ? "" : "s")")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
         }
         .formStyle(.grouped)
