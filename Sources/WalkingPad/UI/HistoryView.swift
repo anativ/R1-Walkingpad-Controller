@@ -258,14 +258,20 @@ struct HistoryView: View {
                     systemImage: "shoeprints.fill",
                     tint: .indigo
                 )
-                MetricTile(
-                    label: "Calories",
-                    value: String(format: "%.0f", app.displayKcal(for: totals)),
-                    unit: "kcal",
-                    systemImage: "flame.fill",
-                    tint: .orange,
-                    footnote: app.kcalFootnote
-                )
+                SettingsLink {
+                    MetricTile(
+                        label: "Calories",
+                        value: String(format: "%.0f", app.displayKcal(for: totals)),
+                        unit: "kcal",
+                        systemImage: "flame.fill",
+                        tint: .orange,
+                        footnote: app.isBodyDataConfigured
+                            ? app.kcalFootnote
+                            : "set your weight →"
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Set your weight and height so this estimate is right")
                 MetricTile(
                     label: "Walks",
                     value: "\(totals.sessionCount)",

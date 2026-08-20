@@ -164,14 +164,22 @@ struct MetricsGrid: View {
                 systemImage: "shoeprints.fill",
                 tint: .indigo
             )
-            MetricTile(
-                label: "Calories",
-                value: String(format: "%.0f", app.sessionKcal),
-                unit: "kcal",
-                systemImage: "flame.fill",
-                tint: .orange,
-                footnote: app.kcalFootnote
-            )
+            // The calorie figure depends on body data most people never find in Settings, so the
+            // number itself is the way in: click it to go straight there.
+            SettingsLink {
+                MetricTile(
+                    label: "Calories",
+                    value: String(format: "%.0f", app.sessionKcal),
+                    unit: "kcal",
+                    systemImage: "flame.fill",
+                    tint: .orange,
+                    footnote: app.isBodyDataConfigured
+                        ? app.kcalFootnote
+                        : "set your weight →"
+                )
+            }
+            .buttonStyle(.plain)
+            .help("Set your weight and height so this estimate is right")
             MetricTile(
                 label: "Pace",
                 value: Metrics.formatPace(app.paceMinPerUnit),

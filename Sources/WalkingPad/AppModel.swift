@@ -598,6 +598,14 @@ final class AppModel: ObservableObject {
         displayKcal(gross: tracker.kcal, durationSeconds: status?.elapsed ?? 0)
     }
 
+    /// Whether the user has actually entered their own weight, or is still on the default.
+    ///
+    /// Worth surfacing: the estimate is mostly a function of weight, so a default one is a number
+    /// nobody should trust, and silently showing it looks the same as a real one.
+    var isBodyDataConfigured: Bool {
+        UserDefaults.standard.object(forKey: Keys.weight) != nil
+    }
+
     /// Label clarifying which figure is on screen.
     var kcalFootnote: String { settings.showNetCalories ? "net, estimated" : "estimated" }
 
