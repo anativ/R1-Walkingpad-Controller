@@ -192,6 +192,9 @@ private struct MenuBarContent: View {
         HistoryWindowButton()
         MainWindowButton()
             .environmentObject(app)
+        // Reachable from here too: with the window closed or the Dock icon hidden, the app menu's
+        // Settings item is not available, and this was the only route left.
+        SettingsLink { Text("Settings…") }
         Button("Quit WalkingPad") { NSApp.terminate(nil) }
     }
 }

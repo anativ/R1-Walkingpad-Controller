@@ -24,8 +24,11 @@ enum MenuBarReadout: String, CaseIterable, Identifiable {
 
 struct AppSettings: Equatable {
     var unit: DistanceUnit = .kilometers
-    /// App-side speed ceiling for the slider. Independent of the belt's own max-speed setting.
-    var speedCeilingKph: Double = 6.0
+    /// Everyday walking ceiling for the slider, presets and programs. Independent of the belt's
+    /// own max-speed setting.
+    var speedCeilingKph: Double = SpeedLimits.defaultWalkingCeilingKph
+    /// Running mode lifts the ceiling to the belt's hardware maximum.
+    var isRunningMode: Bool = false
     /// Speed the Start button uses.
     var startSpeedKph: Double = 2.5
     var weightKg: Double = 75
@@ -46,8 +49,8 @@ struct AppSettings: Equatable {
     var quitBehavior: QuitBehavior = .ask
 
     /// The R1 Pro tops out at 10 km/h; never let the UI ask for more than the hardware allows.
-    static let hardMaxSpeedKph: Double = 10.0
-    static let minRunningSpeedKph: Double = 0.5
+    static let hardMaxSpeedKph: Double = SpeedLimits.hardMaxKph
+    static let minRunningSpeedKph: Double = SpeedLimits.minRunningKph
 
     var profile: UserProfile {
         UserProfile(weightKg: weightKg, heightCm: heightCm, ageYears: ageYears, sex: sex)
@@ -116,7 +119,9 @@ final class AppModel: ObservableObject {
                 applyDockIconPolicy(hidden: newValue.hideDockIcon)
             }
             // A Slider whose value sits outside its own range misbehaves, so follow the ceiling down.
-            let ceiling = min(newValue.speedCeilingKph, AppSettings.hardMaxSpeedKph)
+            let ceiling = SpeedLimits.effectiveCeiling(
+                walkingCeilingKph: newValue.speedCeilingKph, isRunningMode: newValue.isRunningMode
+            )
             if desiredSpeedKph > ceiling {
                 desiredSpeedKph = ceiling
                 // The ceiling is a safety limit, so it has to reach a belt that is already moving —
@@ -235,7 +240,21 @@ final class AppModel: ObservableObject {
     }
 
     var effectiveMaxSpeed: Double {
-        min(settings.speedCeilingKph, AppSettings.hardMaxSpeedKph)
+        SpeedLimits.effectiveCeiling(
+            walkingCeilingKph: settings.speedCeilingKph, isRunningMode: settings.isRunningMode
+        )
+    }
+
+    /// Speed buttons appropriate to the ceiling in force.
+    var speedPresets: [Double] { SpeedLimits.presets(forCeiling: effectiveMaxSpeed) }
+
+    /// Turn running mode on or off. Unlocking the higher range never changes the belt's speed by
+    /// itself; turning it off pulls anything above the walking ceiling back down.
+    func setRunningMode(_ enabled: Bool) {
+        guard settings.isRunningMode != enabled else { return }
+        var updated = settings
+        updated.isRunningMode = enabled
+        settings = updated
     }
 
     /// True while we've asked for a speed the belt hasn't confirmed yet.
@@ -714,6 +733,7 @@ final class AppModel: ObservableObject {
     private func persist() {
         defaults.set(settings.unit.rawValue, forKey: Keys.unit)
         defaults.set(settings.speedCeilingKph, forKey: Keys.ceiling)
+        defaults.set(settings.isRunningMode, forKey: Keys.runningMode)
         defaults.set(settings.startSpeedKph, forKey: Keys.startSpeed)
         defaults.set(settings.weightKg, forKey: Keys.weight)
         defaults.set(settings.heightCm, forKey: Keys.height)
@@ -760,6 +780,9 @@ final class AppModel: ObservableObject {
         }
         if defaults.object(forKey: Keys.ceiling) != nil {
             settings.speedCeilingKph = defaults.double(forKey: Keys.ceiling)
+        }
+        if defaults.object(forKey: Keys.runningMode) != nil {
+            settings.isRunningMode = defaults.bool(forKey: Keys.runningMode)
         }
         if defaults.object(forKey: Keys.startSpeed) != nil {
             settings.startSpeedKph = defaults.double(forKey: Keys.startSpeed)
@@ -811,6 +834,7 @@ final class AppModel: ObservableObject {
     private enum Keys {
         static let unit = "unit"
         static let ceiling = "speedCeilingKph"
+        static let runningMode = "isRunningMode"
         static let startSpeed = "startSpeedKph"
         static let weight = "weightKg"
         static let height = "heightCm"

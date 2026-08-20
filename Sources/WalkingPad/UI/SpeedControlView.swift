@@ -6,19 +6,46 @@ import WalkingPadKit
 struct SpeedControlView: View {
     @EnvironmentObject private var app: AppModel
 
-    /// Presets clamped to whatever ceiling the user configured.
-    private var presets: [Double] {
-        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0].filter { $0 <= app.effectiveMaxSpeed }
-    }
+    /// Presets suited to the ceiling in force — a different ladder once running is unlocked.
+    private var presets: [Double] { app.speedPresets }
 
     var body: some View {
         CardSection(title: "Speed", systemImage: "speedometer") {
             VStack(spacing: 14) {
+                modeRow
                 targetRow
                 slider
                 presetRow
                 transportRow
             }
+        }
+    }
+
+    /// Walk / Run. Running mode only unlocks the range up to the belt's maximum — it never
+    /// changes the current speed, so switching to it cannot make the belt speed up under you.
+    private var modeRow: some View {
+        HStack(spacing: 8) {
+            Picker("", selection: Binding(
+                get: { app.settings.isRunningMode },
+                set: { app.setRunningMode($0) }
+            )) {
+                Text("Walk").tag(false)
+                Text("Run").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+
+            Text(app.settings.isRunningMode
+                 ? String(format: "Up to %.0f %@ — the belt's maximum",
+                          app.settings.unit.speed(fromKph: app.effectiveMaxSpeed),
+                          app.settings.unit.speedSuffix)
+                 : String(format: "Up to %.1f %@ — raise it in Settings, or switch to Run",
+                          app.settings.unit.speed(fromKph: app.effectiveMaxSpeed),
+                          app.settings.unit.speedSuffix))
+                .font(.caption2)
+                .foregroundStyle(app.settings.isRunningMode ? Color.orange : Color.secondary)
+            Spacer()
         }
     }
 

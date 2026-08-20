@@ -54,6 +54,8 @@ let allChecks: [(String, () throws -> Void)] = [
     ("quit is never blocked by a still belt", quitIsNeverBlockedByAStillBelt),
     ("quit behaviour applies to a running belt", quitBehaviourAppliesToARunningBelt),
     ("quit stop timeout is bounded", quitStopTimeoutIsBounded),
+    ("running mode unlocks the hardware maximum", runningModeUnlocksTheHardwareMaximum),
+    ("presets suit the ceiling in force", presetsSuitTheCeilingInForce),
 ]
 
 func usage() -> Never {

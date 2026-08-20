@@ -27,12 +27,27 @@ Calorie estimates use your own body data — see [Calories](#calories).
 
 - Speed, via slider, ±0.5 buttons, or one-tap presets — in 0.1 km/h steps, finer than the
   belt's own remote allows
+- **Walk / Run** — Run unlocks the belt's full range up to 10 km/h
 - Automatic speed programs — see [Programs](#programs-speed-algorithms)
 - Start / stop, with Space bar as a panic stop and ⌘. as an emergency stop
 - Mode: manual, automatic, standby
 - Belt-side settings: max speed, start speed, sensitivity, child lock, display units,
   intelligent start, and a distance/calorie/time session target
 - A live speed readout in the menu bar — see [Menu bar](#menu-bar)
+
+## Walk and Run
+
+The speed card has a **Walk / Run** switch. Walk caps the slider, presets and programs at your
+configured ceiling (6.0 km/h by default) so a stray drag cannot ask for a jog. **Run** lifts that to
+10 km/h, the R1 Pro's hardware maximum, and swaps the presets for a running ladder
+(2 · 4 · 6 · 7 · 8 · 10).
+
+Switching to Run only unlocks the range — it never changes the belt's current speed, so it cannot
+make the belt speed up under you. Switching back to Walk *does* pull anything above the walking
+ceiling back down, including a running program, because a lowered limit has to reach the hardware.
+
+10 km/h is the last word regardless of settings: a nonsense or corrupted ceiling falls back to the
+belt's minimum rather than upward, since this is a safety limit.
 
 ## Menu bar
 
@@ -169,6 +184,8 @@ no prompt.
 
 The belt reports no calories at all, so the app estimates them from your body data in
 Settings › App › **Body data**. Every field can be typed directly or stepped:
+
+Find it under Settings (**⌘,**) › **Calories**.
 
 | Field | Affects |
 | --- | --- |

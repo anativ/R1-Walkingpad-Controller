@@ -6,64 +6,20 @@ struct SettingsView: View {
     var body: some View {
         TabView {
             AppPreferencesTab()
-                .tabItem { Label("App", systemImage: "gearshape") }
+                .tabItem { Label("General", systemImage: "gearshape") }
+            CaloriesTab()
+                .tabItem { Label("Calories", systemImage: "flame") }
             BeltPreferencesTab()
                 .tabItem { Label("Belt", systemImage: "figure.walk.treadmill") }
         }
-        .frame(width: 460, height: 400)
+        // Body data used to be the last of six sections in a 400pt window, which made it
+        // effectively invisible. It now has its own tab, and the window fits its content.
+        .frame(width: 520, height: 520)
     }
 }
 
 struct AppPreferencesTab: View {
     @EnvironmentObject private var app: AppModel
-    @State private var recalculated: Int?
-
-    /// Spells out what the calorie number actually is, rather than asking you to trust it.
-    private var explainer: String {
-        let restingPerHour = Metrics.restingKcalPerMinute(profile: app.settings.profile) * 60
-        let base = "Walking cost uses the ACSM walking equation, driven mainly by your weight. "
-        if app.settings.showNetCalories {
-            return base + String(
-                format: "Net subtracts resting metabolism (Mifflin-St Jeor, about %.0f kcal/hour "
-                    + "for this body data), leaving the extra the walk actually cost.",
-                restingPerHour
-            )
-        }
-        return base + "Gross counts everything burned while walking, including what you would have "
-            + "burned at rest anyway. Age and sex only affect the net figure."
-    }
-
-    /// A typed field plus a stepper — the previous controls could only be nudged one unit at a time.
-    private func numberRow(
-        _ title: String,
-        value: Binding<Double>,
-        range: ClosedRange<Double>,
-        suffix: String
-    ) -> some View {
-        LabeledContent(title) {
-            HStack(spacing: 6) {
-                TextField(
-                    title,
-                    value: Binding(
-                        get: { value.wrappedValue },
-                        // Clamp on commit so a typo cannot push the model out of range.
-                        set: { value.wrappedValue = min(max(range.lowerBound, $0), range.upperBound) }
-                    ),
-                    format: .number.precision(.fractionLength(0))
-                )
-                .labelsHidden()
-                .frame(width: 64)
-                .multilineTextAlignment(.trailing)
-                Text(suffix)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 44, alignment: .leading)
-                Stepper(title, value: value, in: range, step: 1)
-                    .labelsHidden()
-            }
-        }
-    }
-
     var body: some View {
         Form {
             Section("Display") {
@@ -144,7 +100,37 @@ struct AppPreferencesTab: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Section("Body data (for the calorie estimate)") {
+        }
+        .formStyle(.grouped)
+    }
+}
+
+/// Body data and how calories are worked out.
+///
+/// This has its own tab because it is what people go looking for, and it was previously the last
+/// of six sections in a 400pt window — present, but effectively impossible to find.
+struct CaloriesTab: View {
+    @EnvironmentObject private var app: AppModel
+    @State private var recalculated: Int?
+
+    /// Spells out what the number actually is, rather than asking you to trust it.
+    private var explainer: String {
+        let restingPerHour = Metrics.restingKcalPerMinute(profile: app.settings.profile) * 60
+        let base = "Walking cost uses the ACSM walking equation, driven mainly by your weight. "
+        if app.settings.showNetCalories {
+            return base + String(
+                format: "Net subtracts resting metabolism (Mifflin-St Jeor, about %.0f kcal/hour "
+                    + "for this body data), leaving the extra the walk actually cost.",
+                restingPerHour
+            )
+        }
+        return base + "Gross counts everything burned while walking, including what you would have "
+            + "burned at rest anyway. Age and sex only affect the net figure."
+    }
+
+    var body: some View {
+        Form {
+            Section("Your body") {
                 Picker("Weight in", selection: Binding(
                     get: { app.settings.weightUnit },
                     set: { app.settings.weightUnit = $0 }
@@ -184,6 +170,9 @@ struct AppPreferencesTab: View {
                 )) {
                     ForEach(BiologicalSex.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
+            }
+
+            Section("How calories are counted") {
                 Toggle("Show net calories", isOn: Binding(
                     get: { app.settings.showNetCalories },
                     set: { app.settings.showNetCalories = $0 }
@@ -192,6 +181,9 @@ struct AppPreferencesTab: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Section("Walks already recorded") {
                 LabeledContent("Past walks") {
                     HStack {
                         Button("Recalculate calories") {
@@ -207,9 +199,45 @@ struct AppPreferencesTab: View {
                         }
                     }
                 }
+                Text("Stored walks were worked out with the body data set at the time, so changing "
+                     + "your weight only affects future walks until you press this.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// A typed field plus a stepper, so a weight can be entered rather than clicked up to.
+    private func numberRow(
+        _ title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        suffix: String
+    ) -> some View {
+        LabeledContent(title) {
+            HStack(spacing: 6) {
+                TextField(
+                    title,
+                    value: Binding(
+                        get: { value.wrappedValue },
+                        // Clamp on commit so a typo cannot push the model out of range.
+                        set: { value.wrappedValue = min(max(range.lowerBound, $0), range.upperBound) }
+                    ),
+                    format: .number.precision(.fractionLength(0))
+                )
+                .labelsHidden()
+                .frame(width: 64)
+                .multilineTextAlignment(.trailing)
+                Text(suffix)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .leading)
+                Stepper(title, value: value, in: range, step: 1)
+                    .labelsHidden()
+            }
+        }
     }
 }
 

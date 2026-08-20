@@ -966,3 +966,51 @@ func quitStopTimeoutIsBounded() throws {
     check(QuitPolicy.stopConfirmationTimeout <= 10,
           "must not leave the user staring at an app that will not quit")
 }
+
+// MARK: - Running mode and the speed ceiling
+
+/// Running mode unlocks the belt's maximum; nothing may ever exceed it.
+func runningModeUnlocksTheHardwareMaximum() throws {
+    check(SpeedLimits.effectiveCeiling(walkingCeilingKph: 6, isRunningMode: false) == 6,
+          "walking uses the configured ceiling")
+    check(SpeedLimits.effectiveCeiling(walkingCeilingKph: 6, isRunningMode: true) == 10,
+          "running unlocks the hardware maximum")
+    check(SpeedLimits.effectiveCeiling(walkingCeilingKph: 3, isRunningMode: true) == 10,
+          "running ignores a lower walking ceiling")
+    // The hard maximum is the last word, whatever the settings claim.
+    check(SpeedLimits.effectiveCeiling(walkingCeilingKph: 25, isRunningMode: false) == 10,
+          "an absurd walking ceiling must still clamp to the hardware maximum")
+    // Non-finite input is nonsense, and this is a safety limit: fall back to the most restrictive
+    // value rather than clamping upward to the maximum.
+    check(SpeedLimits.effectiveCeiling(walkingCeilingKph: .infinity, isRunningMode: false)
+          == SpeedLimits.minRunningKph, "an infinite ceiling must fail safe, not fail fast")
+    check(SpeedLimits.effectiveCeiling(walkingCeilingKph: .nan, isRunningMode: false)
+          == SpeedLimits.minRunningKph, "a NaN ceiling must not escape into the UI")
+    // Running mode is unaffected by a nonsense walking ceiling, since it uses the maximum directly.
+    check(SpeedLimits.effectiveCeiling(walkingCeilingKph: .nan, isRunningMode: true) == 10)
+    // Never below what the belt can actually run.
+    check(SpeedLimits.effectiveCeiling(walkingCeilingKph: 0, isRunningMode: false)
+          == SpeedLimits.minRunningKph)
+    check(SpeedLimits.effectiveCeiling(walkingCeilingKph: -5, isRunningMode: false)
+          == SpeedLimits.minRunningKph)
+    check(SpeedLimits.hardMaxKph == 10.0, "the R1 Pro's maximum")
+}
+
+/// Presets must stay inside the ceiling, and offer useful values in each mode.
+func presetsSuitTheCeilingInForce() throws {
+    let walking = SpeedLimits.presets(forCeiling: 6)
+    check(walking == [1, 2, 3, 4, 5, 6], "walking ladder: \(walking)")
+
+    let running = SpeedLimits.presets(forCeiling: 10)
+    check(running == [2, 4, 6, 7, 8, 10], "running ladder: \(running)")
+    check(running.count <= 6, "too many buttons is not a choice")
+
+    // A lowered ceiling must drop the presets above it, in either mode.
+    for ceiling in [0.5, 1.0, 2.5, 3.0, 6.0, 7.5, 10.0] {
+        let presets = SpeedLimits.presets(forCeiling: ceiling)
+        check(presets.allSatisfy { $0 <= ceiling },
+              "preset above the ceiling \(ceiling): \(presets)")
+    }
+    check(SpeedLimits.presets(forCeiling: 0.5).isEmpty,
+          "no preset is valid below the belt's minimum")
+}
