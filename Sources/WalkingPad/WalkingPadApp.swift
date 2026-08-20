@@ -135,6 +135,10 @@ private struct MenuBarContent: View {
 
     var body: some View {
         if let status = app.status {
+            // The menu bar label is a bare number, so this is where the unit is stated.
+            Text(String(format: "Speed %.1f %@",
+                        app.settings.unit.speed(fromKph: status.speedKph),
+                        app.settings.unit.speedSuffix))
             Text("\(Metrics.formatDuration(status.elapsed)) · \(status.steps) steps")
             Text(String(format: "%.2f %@ · %.0f kcal",
                         app.settings.unit.distance(fromKm: status.distanceKm),

@@ -331,7 +331,7 @@ final class AppModel: ObservableObject {
         case .iconOnly:
             return nil
         case .speed:
-            // Just the number. It replaces the icon, and the units are one click away in the menu.
+            // Just the number: it replaces the icon. The menu states the unit explicitly.
             return speed
         case .speedAndDistance:
             return String(format: "%@ · %.2f %@", speed,

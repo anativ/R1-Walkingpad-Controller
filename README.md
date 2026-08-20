@@ -30,7 +30,45 @@ charts and CSV export — see [History](#history).
 - Mode: manual, automatic, standby
 - Belt-side settings: max speed, start speed, sensitivity, child lock, display units,
   intelligent start, and a distance/calorie/time session target
-- A menu-bar readout of live speed, steps, distance and calories
+- A live speed readout in the menu bar — see [Menu bar](#menu-bar)
+
+## Menu bar
+
+The live speed sits in the macOS menu bar as a plain number, in place of an icon, so it stays
+visible whether the window is focused, minimised, closed, or hidden entirely. Pick what it shows in
+Settings › App › **Menu bar shows**:
+
+| Option | Example |
+| --- | --- |
+| Icon only | 🚶 |
+| Speed (default) | `5.0` |
+| Speed and distance | `5.0 · 1.24 km` |
+| Speed and time | `5.0 · 22:14` |
+| Speed and steps | `5.0 · 2841 steps` |
+
+The icon appears only when there is nothing to report — no belt connected, or "Icon only" chosen.
+Clicking it gives the speed with its unit, elapsed time, steps, distance, calories, program status,
+start/stop, faster/slower, and a way back to the window or the history.
+
+Turn on **Menu bar only (hide Dock icon)** to run it as a pure menu-bar app with no Dock icon and no
+app-switcher entry. Enabling it keeps the menu-bar item on, since hiding both would leave a running
+app with no icon, no window and no menu to quit from.
+
+### The beep
+
+The belt beeps every time it accepts a command, and that **cannot be turned off from this app**.
+Neither reverse-engineered protocol implementation
+([ph4r05/ph4-walkingpad](https://github.com/ph4r05/ph4-walkingpad),
+[darnfish/walkingpad](https://github.com/darnfish/walkingpad)) exposes a sound, volume or mute
+preference — the belt's settable preferences are limited to max speed, start speed, intelligent
+start, sensitivity, display, units, child lock and session target — and KingSmith's own app has no
+mute either. The beep is firmware-level acknowledgement of a received command, not something the
+protocol controls.
+
+Status polling is silent, so an idle connection makes no noise. The only lever from software is how
+often a program changes speed: a larger `Change by` over a longer interval means fewer beeps per hour
+for the same walk. Beyond that the reported fixes are physical — damping or removing the panel
+speaker.
 
 ## Programs (speed algorithms)
 
