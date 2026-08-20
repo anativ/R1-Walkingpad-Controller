@@ -116,8 +116,11 @@ private struct MenuBarLabel: View {
     var body: some View {
         Group {
             if let summary = app.menuBarSummary {
-                Label(summary, systemImage: app.isMoving ? "figure.walk.motion" : "figure.walk.treadmill")
+                // Text instead of a Label: the number replaces the icon rather than sitting
+                // beside it, so the speed is what you actually read in the menu bar.
+                Text(summary)
             } else {
+                // Nothing to report yet (not connected) — fall back to the icon.
                 Image(systemName: "figure.walk.treadmill")
             }
         }
