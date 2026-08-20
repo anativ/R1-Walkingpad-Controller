@@ -33,6 +33,10 @@ this repository only, and it was set by the repo owner. Just commit and push.
   terminal that holds the Bluetooth permission — never from a script or an agent shell.
 - Ad-hoc signing means the signature changes every rebuild, so macOS may re-ask for Bluetooth
   permission after a rebuild.
+- **Never `--install` while the app is running.** Replacing the bundle of a running, ad-hoc-signed
+  app makes macOS terminate it, which kills a walk or program in progress. `build.sh --install`
+  now refuses to do this unless `FORCE_INSTALL=1`. To hand over a new build without disturbing a
+  running session, build only (`./build.sh`) and let the user quit and relaunch.
 
 ## Verifying GUI behaviour
 

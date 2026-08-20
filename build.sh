@@ -71,6 +71,20 @@ chmod +x "$DIST/padctl"
 echo "==> Built $APP"
 
 if [[ "${1:-}" == "--install" ]]; then
+  # Replacing the bundle of a RUNNING app terminates it: macOS validates code pages lazily, and
+  # an ad-hoc signature cannot be re-validated once the bundle is gone. That silently kills a
+  # session someone may be mid-walk in, so refuse by default.
+  if pgrep -f "/Applications/$APP_NAME.app/Contents/MacOS/$APP_NAME" >/dev/null 2>&1; then
+    if [[ "${FORCE_INSTALL:-0}" != "1" ]]; then
+      echo "!!! $APP_NAME is currently running." >&2
+      echo "    Installing would replace its bundle and macOS would terminate it," >&2
+      echo "    ending any walk or program in progress." >&2
+      echo "    Quit the app first, or re-run with FORCE_INSTALL=1 to override." >&2
+      echo "    The build in $APP is ready either way." >&2
+      exit 1
+    fi
+    echo "==> WARNING: $APP_NAME is running and will be terminated (FORCE_INSTALL=1)"
+  fi
   echo "==> Installing to /Applications"
   rm -rf "/Applications/$APP_NAME.app"
   cp -R "$APP" "/Applications/$APP_NAME.app"

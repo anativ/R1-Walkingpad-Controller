@@ -356,6 +356,8 @@ final class AppModel: ObservableObject {
     // MARK: - Quitting
 
     private var quitStopTimer: Timer?
+    private var quitBackstop: DispatchWorkItem?
+    private var hasRepliedToQuit = false
 
     /// Decide what to do about a quit request. Called from the app delegate.
     ///
@@ -363,7 +365,9 @@ final class AppModel: ObservableObject {
     /// which every branch below guarantees — a quit must never hang waiting on hardware.
     func handleQuitRequest() -> NSApplication.TerminateReply {
         switch QuitPolicy.action(
-            behavior: settings.quitBehavior, isConnected: isConnected, beltIsMoving: isMoving
+            behavior: settings.quitBehavior,
+            isConnected: isConnected,
+            beltIsMoving: beltIsMovingOrAboutTo
         ) {
         case .quitNow:
             return .terminateNow
@@ -383,15 +387,34 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Whether the belt is moving, or has been told to and simply has not reported it yet.
+    ///
+    /// Status frames arrive about once a second and a start sequence takes ~1.4 s to clear the
+    /// command queue, so `isMoving` alone says "stopped" for a moment after you press Start. Quitting
+    /// in that window would skip the prompt entirely and walk away from a belt about to move.
+    var beltIsMovingOrAboutTo: Bool {
+        if isMoving { return true }
+        if let pending = controller.inFlightSpeedRaw, pending > 0 { return true }
+        return false
+    }
+
+    /// Speed to quote in the prompt: the belt's own, or the one it is still being told to run at.
+    private var quotedSpeedKph: Double {
+        if beltSpeedKph > 0 { return beltSpeedKph }
+        if let pending = controller.inFlightSpeedRaw { return Double(pending) / 10 }
+        return 0
+    }
+
     private enum QuitChoice { case stopAndQuit, quitAnyway, cancel }
 
     private func presentQuitAlert() -> QuitChoice {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = String(
-            format: "The belt is still running at %.1f %@.",
-            settings.unit.speed(fromKph: beltSpeedKph), settings.unit.speedSuffix
-        )
+        alert.messageText = isMoving
+            ? String(format: "The belt is still running at %.1f %@.",
+                     settings.unit.speed(fromKph: quotedSpeedKph), settings.unit.speedSuffix)
+            : String(format: "The belt is starting up at %.1f %@.",
+                     settings.unit.speed(fromKph: quotedSpeedKph), settings.unit.speedSuffix)
         alert.informativeText = isProgramRunning
             ? "Quitting also ends the running program, so the belt will hold this speed instead of "
                 + "continuing to change."
@@ -411,29 +434,88 @@ final class AppModel: ObservableObject {
         runner.stop(reason: "quitting")
         controller.stop()
         controller.appendLog("Quitting — waiting for the belt to stop", .info)
+        hasRepliedToQuit = false
 
         let deadline = Date().addingTimeInterval(QuitPolicy.stopConfirmationTimeout)
-        quitStopTimer?.invalidate()
-        quitStopTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
-            guard let self else {
+
+        // The timer MUST be registered in `.common`. While AppKit waits for the terminate reply it
+        // runs the run loop in NSModalPanelRunLoopMode, and a timer created by
+        // `Timer.scheduledTimer` is registered only in the default mode — it would never fire, the
+        // reply would never come, and the app would be unquittable.
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else {
+                    timer.invalidate()
+                    NSApp.reply(toApplicationShouldTerminate: true)
+                    return
+                }
+                // A confirmed stop means the belt SAID it stopped. Losing the connection ends the
+                // wait — we can no longer influence the belt — but it is not confirmation, and
+                // treating it as such would quit silently on a belt that may still be running.
+                let confirmed = !self.isMoving
+                guard confirmed || !self.isConnected || Date() >= deadline else { return }
                 timer.invalidate()
-                NSApp.reply(toApplicationShouldTerminate: true)
-                return
+                if !confirmed, !self.isConnected {
+                    self.controller.appendLog(
+                        "Lost the connection while waiting for the stop to confirm", .warning
+                    )
+                }
+                self.finishQuit(confirmedStopped: confirmed)
             }
-            // Losing the connection means we can no longer influence the belt; stop waiting.
-            let stopped = !self.isMoving || !self.isConnected
-            guard stopped || Date() >= deadline else { return }
-            timer.invalidate()
-            self.quitStopTimer = nil
-            if !stopped {
-                self.controller.appendLog(
-                    "Belt did not confirm the stop within "
-                    + "\(Int(QuitPolicy.stopConfirmationTimeout))s — quitting anyway", .warning
-                )
-            }
-            self.finishOpenWalk()
-            NSApp.reply(toApplicationShouldTerminate: true)
         }
+        RunLoop.main.add(timer, forMode: .common)
+        quitStopTimer?.invalidate()
+        quitStopTimer = timer
+
+        // An independent backstop on the main queue, which is serviced in every run loop mode.
+        // Two unrelated mechanisms means a hung quit needs both to fail.
+        quitBackstop?.cancel()
+        let backstop = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.hasRepliedToQuit else { return }
+                self.controller.appendLog("Quit backstop fired", .warning)
+                self.finishQuit(confirmedStopped: !self.isMoving)
+            }
+        }
+        quitBackstop = backstop
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + QuitPolicy.stopConfirmationTimeout + 1, execute: backstop
+        )
+    }
+
+    /// Reply to AppKit exactly once. Idempotent, because the timer and the backstop race.
+    private func finishQuit(confirmedStopped: Bool) {
+        guard !hasRepliedToQuit else { return }
+        hasRepliedToQuit = true
+        quitStopTimer?.invalidate()
+        quitStopTimer = nil
+        quitBackstop?.cancel()
+        quitBackstop = nil
+
+        var proceed = true
+        if !confirmedStopped {
+            // Quitting silently here would leave the user believing a treadmill is stopped when it
+            // may not be. Put that decision to them rather than assuming.
+            controller.appendLog(
+                "Belt did not confirm the stop within "
+                + "\(Int(QuitPolicy.stopConfirmationTimeout))s", .warning
+            )
+            proceed = confirmUnconfirmedStop()
+        }
+        if proceed { finishOpenWalk() }
+        NSApp.reply(toApplicationShouldTerminate: proceed)
+        // Cancelling leaves the app running, so allow a later quit to start this over.
+        if !proceed { hasRepliedToQuit = false }
+    }
+
+    private func confirmUnconfirmedStop() -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "The belt did not confirm that it stopped."
+        alert.informativeText = "It may still be running. Check the belt, or quit anyway."
+        alert.addButton(withTitle: "Quit Anyway")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     // MARK: - Walk history
