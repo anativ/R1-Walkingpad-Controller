@@ -198,9 +198,64 @@ Also: `ps -o %cpu` catches render loops, `sample <pid>` finds the hot stack, and
 
 ## 3. Verifying when there is no Swift toolchain
 
-**A Claude Code session running remotely (in the cloud container) has no Swift compiler at all.**
-The project is macOS-only; `swift` and `swiftc` do not exist there. You can neither build nor run
-`padctl selftest`. Do not spend turns discovering this.
+### Where the session actually runs
+
+**A Claude Code web/app session does not run on the user's Mac.** It runs in an ephemeral Linux
+container in the cloud, and the repository was cloned into it fresh. This catches people out,
+because the user *is* sitting at a Mac — but the agent is not on it, and cannot reach it. One
+command settles it:
+
+```bash
+uname -s -m        # Linux x86_64   — not Darwin arm64
+sw_vers            # command not found
+ls /System/Library/Frameworks   # No such file or directory
+```
+
+What follows from that, and none of it is fixable from inside the container:
+
+| Missing | Consequence |
+| --- | --- |
+| `swift`, `swiftc`, `xcrun` (not preinstalled) | `swift build` and `./build.sh` cannot run |
+| The macOS SDK — AppKit, SwiftUI, CoreBluetooth, `os` | The app target cannot compile *at all*, on any toolchain |
+| A Mac, and a physical belt | No hardware path can be exercised, ever |
+
+So in a remote session the Mac is the only real gate, and `./build.sh --run` there is the only thing
+that proves the tree compiles. Do not spend turns discovering this, and do not tell the user "it
+builds".
+
+### A real Swift type-checker *is* obtainable, for part of the code
+
+`swift` is not preinstalled, but a Linux toolchain downloads and unpacks in about two minutes:
+
+```bash
+curl -sSL -o swift.tar.gz \
+  https://download.swift.org/swift-6.1.2-release/ubuntu2404/swift-6.1.2-RELEASE/swift-6.1.2-RELEASE-ubuntu24.04.tar.gz
+mkdir -p swift && tar xzf swift.tar.gz -C swift --strip-components=1
+./swift/usr/bin/swift --version    # Swift version 6.1.2, x86_64-unknown-linux-gnu
+```
+
+That costs ~880 MB down and ~2.8 GB unpacked — fine against the container's allowance, but put it in
+the scratchpad, never in the repo. It cannot build the project (`Package.swift` declares
+`platforms: [.macOS(.v14)]`, and the app needs Apple frameworks). What it *can* do is type-check the
+Foundation-only part of `WalkingPadKit`, which is where most of the logic lives:
+
+| Reach | Files | Route |
+| --- | --- | --- |
+| Type-checks as-is | 11 of 14 kit files — `SpeedProgram`, `PaceAlgorithm`, `SpeedLimits`, `Metrics`, `CommandQueue`, `SessionTracker`, `SessionRecorder`, `WalkSession`, `QuitPolicy`, `PadPacket`, `PadStatus` | Copy into a throwaway SPM package in the scratchpad |
+| Needs a small shim | `ProgramRunner`, `SessionStore` — `import Combine` only | ~30 lines: an `ObservableObject` protocol and a `@Published` property wrapper |
+| Out of reach | `PadController` (CoreBluetooth + `os`), all 11 `Sources/WalkingPad` files (SwiftUI/AppKit) | Mac only |
+
+`Harness.swift` and `ProtocolChecks.swift` import only Foundation and `WalkingPadKit`, so with the
+Combine shim a large slice of the real check suite could be compiled and *run* on Linux — everything
+except the checks that touch `PadController`. That would close exactly the gap the Python port below
+leaves open: real syntax, real types, real exhaustiveness.
+
+**This route was identified but not carried through** — the toolchain was downloaded and verified to
+run, and the per-file breakdown above is measured, but no package was assembled and no Swift was
+compiled. Treat it as a promising lead, not a proven workflow. If you take it, the payoff is that
+"the logic is right but it may not compile" stops being a caveat you have to ship.
+
+Until then, the technique below is what has actually been used.
 
 ### The technique that worked
 
@@ -1044,5 +1099,54 @@ Written down rather than guessed at.
   fragment.
 - **Assertion counts in commit messages drift.** The suite is currently 69 check functions
   (`allChecks`) over 374 `check(...)` call sites; the runtime assertion count is higher because many
-  are inside loops. I did not run it — there is no Swift toolchain here — so I quote structure, not
-  results.
+  are inside loops. It was not run — no Swift toolchain was installed at the time of writing (see
+  §3) — so this quotes structure, not results.
+
+---
+
+## 14. Session log — what landed, and how far it was verified
+
+Kept because the most urgent question for a session picking this up is not "how does it work" but
+"what state is this in". Newest first.
+
+### 2026-08-21 — pace algorithms, modes, and this document
+
+Two commits, both on `main` (`b7757a9`, `475536d`), written entirely in a remote Linux session.
+
+**What changed.** `SpeedProgram` stopped being a ramp with `(min, max, step, interval)` and became a
+repeating cycle of `PaceBlock`s, because every published protocol for varied walking is expressed
+that way. Five algorithms ship in `PaceAlgorithm.all` — interval walk, micro-surges, three-tier wave,
+long desk session, gentle drift — each with its band offsets, its evidence, and its researched dose.
+`PaceMode` (Working 3.8 / Meeting 5.0) supplies one anchor pace that every algorithm places its band
+around. `ProgramRunner` gained per-block durations, `reband` (change band without restarting, so a
+meeting starting mid-walk does not zero the session), brisk-minute accounting, and remap-by-block.
+`PaceAlgorithmsView` puts each algorithm in its own box; the menu bar got a mode picker and an
+algorithm submenu. 19 new checks, taking `allChecks` to 69. Full rationale in
+`docs/adr/0002-research-backed-pace-algorithms.md`.
+
+**How far it was verified — read this part.**
+
+| | |
+| --- | --- |
+| Compiled | **No.** Never type-checked, on any toolchain. |
+| `padctl selftest` | **Never run.** |
+| Logic | Validated against a Python port — all pre-existing program/runner checks plus all 19 new assertions pass there (§3). |
+| Hardware | Never touched a belt. |
+
+So the pace model's arithmetic is well tested and its Swift is not tested at all. Expect syntax and
+type errors rather than behavioural ones, and look first at the places where the Python port could
+not help: the SwiftUI result builders in `CycleStrip`, the labelled tuple arrays in `Kind.blueprint`,
+the `Picker`/`Menu` nested in a `CommandMenu`, and `Codable` synthesis on the reshaped
+`SpeedProgram`. §3 lists the specific constructs that bit while writing it.
+
+**Deliberately not done.** A confirmed defect was found while writing this document and left alone:
+lowering the app speed ceiling below a running program's whole band stops the program without
+slowing the belt. It is described in §13 and cross-referenced from invariant 6 in §8. It predates
+these commits. Fixing it wants two things — `applyCeiling` reporting that it stopped (or the
+`settings` setter re-asserting the ceiling unconditionally afterwards), and the missing assertion in
+`loweringCeilingReclampsRunningProgram`, which today checks `!runner.isRunning` for an impossible
+ceiling but never checks that a speed was commanded. That omission is why the bug got through.
+
+**Also attempted, then stopped.** Installing a Swift Linux toolchain to type-check the
+Foundation-only subset. The toolchain downloads and runs (verified, Swift 6.1.2); no package was
+assembled. §3 records the route and the per-file reach.
