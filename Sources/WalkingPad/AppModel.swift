@@ -29,6 +29,12 @@ struct AppSettings: Equatable {
     var speedCeilingKph: Double = SpeedLimits.defaultWalkingCeilingKph
     /// Running mode lifts the ceiling to the belt's hardware maximum.
     var isRunningMode: Bool = false
+    /// What you are doing at the desk, which decides the band the pace algorithms walk in.
+    var paceMode: PaceMode = .work
+    /// The anchor pace each mode is built around, in raw 0.1 km/h units. Every algorithm places
+    /// its own band around the anchor, so one number per mode tunes all of them together.
+    var workAnchorRaw: Int = PaceMode.work.defaultAnchorRaw
+    var meetingAnchorRaw: Int = PaceMode.meeting.defaultAnchorRaw
     /// Speed the Start button uses.
     var startSpeedKph: Double = 2.5
     var weightKg: Double = 75
@@ -54,6 +60,20 @@ struct AppSettings: Equatable {
 
     var profile: UserProfile {
         UserProfile(weightKg: weightKg, heightCm: heightCm, ageYears: ageYears, sex: sex)
+    }
+
+    /// The anchor pace for a mode, kept inside that mode's sane range.
+    func anchorRaw(for mode: PaceMode) -> Int {
+        let stored = mode == .work ? workAnchorRaw : meetingAnchorRaw
+        return min(max(mode.anchorRange.lowerBound, stored), mode.anchorRange.upperBound)
+    }
+
+    mutating func setAnchorRaw(_ raw: Int, for mode: PaceMode) {
+        let clamped = min(max(mode.anchorRange.lowerBound, raw), mode.anchorRange.upperBound)
+        switch mode {
+        case .work: workAnchorRaw = clamped
+        case .meeting: meetingAnchorRaw = clamped
+        }
     }
 }
 
@@ -628,13 +648,19 @@ final class AppModel: ObservableObject {
 
     var isProgramRunning: Bool { runner.isRunning }
 
+    /// True only when the freehand editor is the thing driving the belt. The algorithm boxes use
+    /// the same runner, so without this the editor would show a Stop button for someone else's run.
+    var isFreehandProgramRunning: Bool { runner.isRunning && !startedFromAlgorithmBox }
+
     /// Start the edited program. Clamped to the app's speed ceiling by the runner.
     func startProgram() {
         guard isConnected else { return }
+        startedFromAlgorithmBox = false
         runner.start(program, ceilingRaw: SpeedProgram.raw(effectiveMaxSpeed))
     }
 
     func stopProgram() {
+        startedFromAlgorithmBox = false
         runner.stop(reason: "stopped by you")
     }
 
@@ -683,10 +709,10 @@ final class AppModel: ObservableObject {
         program.isValid && program.clamped(toCeilingRaw: SpeedProgram.raw(effectiveMaxSpeed)) != nil
     }
 
-    /// A note when the app's speed ceiling gets in the program's way. The program is left exactly
+    /// A note when the app's speed ceiling gets in a program's way. The program is left exactly
     /// as the user wrote it — silently rewriting their numbers would lose their intent — but the
     /// consequence is spelled out rather than discovered when Start does nothing.
-    var programCeilingNote: String? {
+    func ceilingNote(for program: SpeedProgram) -> String? {
         guard program.isValid else { return nil }
         let ceilingRaw = SpeedProgram.raw(effectiveMaxSpeed)
         guard program.maxRaw > ceilingRaw else { return nil }
@@ -703,13 +729,94 @@ final class AppModel: ObservableObject {
         )
     }
 
+    var programCeilingNote: String? { ceilingNote(for: program) }
+
+    // MARK: - Research-backed pace algorithms
+
+    /// The anchor pace of the mode in force, in raw 0.1 km/h units.
+    var currentAnchorRaw: Int { settings.anchorRaw(for: settings.paceMode) }
+
+    /// The program an algorithm becomes right now: its own band, placed around the current mode's
+    /// anchor pace. Not yet clamped — the runner applies the ceiling, and `ceilingNote(for:)`
+    /// explains it.
+    func bandedProgram(for algorithm: PaceAlgorithm) -> SpeedProgram {
+        algorithm.program(anchorRaw: currentAnchorRaw)
+    }
+
+    /// Which algorithm is driving the belt, if one is.
+    var runningAlgorithm: PaceAlgorithm? {
+        guard let kind = runner.activeProgram?.kind, runner.isRunning else { return nil }
+        // The freehand editor uses the same kinds, so only a run started from a box counts.
+        guard startedFromAlgorithmBox else { return nil }
+        return PaceAlgorithm.named(kind)
+    }
+
+    /// Set when a run was started from an algorithm box rather than the freehand editor, so the
+    /// two places that can drive the belt do not each claim the other's running state.
+    private var startedFromAlgorithmBox = false
+
+    func isRunning(_ algorithm: PaceAlgorithm) -> Bool {
+        runningAlgorithm?.kind == algorithm.kind
+    }
+
+    /// Whether this algorithm could start right now, ceiling included.
+    func canStart(_ algorithm: PaceAlgorithm) -> Bool {
+        let candidate = bandedProgram(for: algorithm)
+        return candidate.isValid
+            && candidate.clamped(toCeilingRaw: SpeedProgram.raw(effectiveMaxSpeed)) != nil
+    }
+
+    /// Start an algorithm from its box. Starting one while another runs swaps to it, which is what
+    /// tapping a different box plainly means.
+    func startAlgorithm(_ algorithm: PaceAlgorithm) {
+        guard isConnected else { return }
+        if runner.isRunning { runner.stop(reason: "switching program") }
+        startedFromAlgorithmBox = runner.start(
+            bandedProgram(for: algorithm), ceilingRaw: SpeedProgram.raw(effectiveMaxSpeed)
+        )
+    }
+
+    func toggleAlgorithm(_ algorithm: PaceAlgorithm) {
+        if isRunning(algorithm) {
+            stopProgram()
+        } else {
+            startAlgorithm(algorithm)
+        }
+    }
+
+    /// Switch what you are doing at the desk. A running algorithm follows the new band immediately
+    /// — the whole point of the switch is that a meeting just started, or just ended.
+    func setPaceMode(_ mode: PaceMode) {
+        guard settings.paceMode != mode else { return }
+        var updated = settings
+        updated.paceMode = mode
+        settings = updated
+        guard let algorithm = runningAlgorithm else { return }
+        let band = bandedProgram(for: algorithm)
+        controller.appendLog(String(format: "%@ mode — %@ now %.1f–%.1f km/h",
+                                    mode.label, algorithm.name, band.minKph, band.maxKph), .info)
+        // Reband rather than restart: the brisk minutes already walked stay on the clock.
+        runner.reband(to: band, ceilingRaw: SpeedProgram.raw(effectiveMaxSpeed))
+    }
+
+    /// Tune a mode's anchor pace. A running algorithm follows it live, so the band can be found by
+    /// feel while walking instead of guessed at from a standstill.
+    func setAnchorRaw(_ raw: Int, for mode: PaceMode) {
+        var updated = settings
+        updated.setAnchorRaw(raw, for: mode)
+        settings = updated
+        guard mode == settings.paceMode, let algorithm = runningAlgorithm else { return }
+        runner.reband(to: bandedProgram(for: algorithm),
+                      ceilingRaw: SpeedProgram.raw(effectiveMaxSpeed))
+    }
+
     /// Whether the edited program differs from its saved counterpart.
     var programHasUnsavedChanges: Bool {
         guard let stored = savedPrograms.first(where: { $0.id == program.id }) else { return true }
         return stored != program
     }
 
-    /// Restore the defaults from the original request: 4.0–5.5 km/h, 0.1 steps, every 2 minutes.
+    /// Restore the freehand defaults: a 4.0–5.5 km/h drift in 0.1 steps, every 2 minutes.
     func resetProgramToDefaults() {
         var fresh = SpeedProgram.standard
         fresh.id = program.id
@@ -753,6 +860,9 @@ final class AppModel: ObservableObject {
         defaults.set(settings.unit.rawValue, forKey: Keys.unit)
         defaults.set(settings.speedCeilingKph, forKey: Keys.ceiling)
         defaults.set(settings.isRunningMode, forKey: Keys.runningMode)
+        defaults.set(settings.paceMode.rawValue, forKey: Keys.paceMode)
+        defaults.set(settings.workAnchorRaw, forKey: Keys.workAnchorRaw)
+        defaults.set(settings.meetingAnchorRaw, forKey: Keys.meetingAnchorRaw)
         defaults.set(settings.startSpeedKph, forKey: Keys.startSpeed)
         defaults.set(settings.weightKg, forKey: Keys.weight)
         defaults.set(settings.heightCm, forKey: Keys.height)
@@ -799,6 +909,15 @@ final class AppModel: ObservableObject {
         }
         if defaults.object(forKey: Keys.ceiling) != nil {
             settings.speedCeilingKph = defaults.double(forKey: Keys.ceiling)
+        }
+        if let raw = defaults.string(forKey: Keys.paceMode), let mode = PaceMode(rawValue: raw) {
+            settings.paceMode = mode
+        }
+        if defaults.object(forKey: Keys.workAnchorRaw) != nil {
+            settings.workAnchorRaw = defaults.integer(forKey: Keys.workAnchorRaw)
+        }
+        if defaults.object(forKey: Keys.meetingAnchorRaw) != nil {
+            settings.meetingAnchorRaw = defaults.integer(forKey: Keys.meetingAnchorRaw)
         }
         if defaults.object(forKey: Keys.runningMode) != nil {
             settings.isRunningMode = defaults.bool(forKey: Keys.runningMode)
@@ -847,6 +966,10 @@ final class AppModel: ObservableObject {
         settings.weightKg = min(max(25, settings.weightKg), 250)
         settings.heightCm = min(max(100, settings.heightCm), 230)
         settings.ageYears = min(max(10, settings.ageYears), 100)
+        // A corrupted anchor would put every algorithm's band in the wrong place, so round-trip
+        // both through the mode's own range rather than trusting what was on disk.
+        settings.setAnchorRaw(settings.workAnchorRaw, for: .work)
+        settings.setAnchorRaw(settings.meetingAnchorRaw, for: .meeting)
         return settings
     }
 
@@ -866,6 +989,9 @@ final class AppModel: ObservableObject {
         static let menuBarContent = "menuBarContent"
         static let hideDockIcon = "hideDockIcon"
         static let quitBehavior = "quitBehavior"
+        static let paceMode = "paceMode"
+        static let workAnchorRaw = "workAnchorRaw"
+        static let meetingAnchorRaw = "meetingAnchorRaw"
         static let draftProgram = "draftProgram"
         static let savedPrograms = "savedPrograms"
     }

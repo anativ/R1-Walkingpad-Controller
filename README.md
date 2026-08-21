@@ -28,7 +28,9 @@ Calorie estimates use your own body data — see [Calories](#calories).
 - Speed, via slider, ±0.5 buttons, or one-tap presets — in 0.1 km/h steps, finer than the
   belt's own remote allows
 - **Walk / Run** — Run unlocks the belt's full range up to 10 km/h
-- Automatic speed programs — see [Programs](#programs-speed-algorithms)
+- **Research-backed pace algorithms**, one box each — see [Pace algorithms](#pace-algorithms)
+- **Working / Meeting mode**, which decides how fast those algorithms may walk you
+- A freehand custom program — see [Custom programs](#custom-programs)
 - Start / stop, with Space bar as a panic stop and ⌘. as an emergency stop
 - Mode: manual, automatic, standby
 - Belt-side settings: max speed, start speed, sensitivity, child lock, display units,
@@ -83,21 +85,90 @@ mute either. The beep is firmware-level acknowledgement of a received command, n
 protocol controls.
 
 Status polling is silent, so an idle connection makes no noise. The only lever from software is how
-often a program changes speed: a larger `Change by` over a longer interval means fewer beeps per hour
-for the same walk. Beyond that the reported fixes are physical — damping or removing the panel
-speaker.
+often the speed changes, so it is worth knowing that the algorithms differ by an order of magnitude
+here: **Micro-surges** changes twice every twelve minutes, **Interval walk** twice every six, and
+**Gentle drift** every two — 30 beeps an hour against 10 or 5. Beyond that the reported fixes are
+physical — damping or removing the panel speaker.
 
-## Programs (speed algorithms)
+## Pace algorithms
 
-A **program** drives the belt speed for you. The built-in `Up / down` algorithm ramps from a minimum
-to a maximum one step at a time, then back down, repeating — every parameter editable and savable:
+Walking 90 minutes at one unvarying pace is the thing this section exists to replace. Each algorithm
+is a **repeating cycle of timed blocks** taken from published research, and each gets its own box
+with its own Start button, its band, a to-scale picture of its cycle, and the evidence behind it.
+
+| Algorithm | Cycle | Brisk per cycle | What it is for |
+| --- | --- | --- | --- |
+| **Interval walk** | 3 min brisk / 3 min easy | 3:00 | The best-evidenced way to raise VO₂ max by walking |
+| **Micro-surges** | 10½ min easy / 90 s surge | 1:30 | Mostly easy, so you can keep typing |
+| **Three-tier wave** | 3 min easy / 2 steady / 1 brisk | 1:00 | Variety without a long hard block |
+| **Long desk session** | 5 intervals, then 30 min easy | 15:00 | For a 90-minute to two-hour walk |
+| **Gentle drift** | ±0.1 km/h every 2 min | none | Least distracting; never the same stride twice |
+
+### Working and Meeting mode
+
+The same protocol is worth walking at two different bands. At 3.5–4 km/h you can type accurately; in
+a meeting your hands are free and the intervals can actually bite. Pick **Working** or **Meeting**
+and set that mode's **anchor pace** — one slider — and every algorithm places its own band around it:
+
+| Algorithm | Working (anchor 3.8) | Meeting (anchor 5.0) |
+| --- | --- | --- |
+| Interval walk | 3.4 – 4.6 | 4.6 – 5.8 |
+| Micro-surges | 3.5 – 5.0 | 4.7 – 6.2 |
+| Three-tier wave | 3.4 – 4.7 | 4.6 – 5.9 |
+| Long desk session | 3.4 – 4.6 | 4.6 – 5.8 |
+| Gentle drift | 3.5 – 4.1 | 4.7 – 5.3 |
+
+Switching mode mid-walk **rebands the running algorithm rather than restarting it**, so a meeting
+starting does not reset your session or your accumulated brisk minutes. Nudging the anchor while
+walking works the same way, so the band can be found by feel instead of guessed at from a standstill.
+
+Anything above your speed ceiling (6.0 km/h by default) is clamped, and the box tells you which
+numbers it will be limited to rather than letting you discover it when nothing happens. Meeting-mode
+micro-surges want 6.2 km/h, so that one needs **Run** or a raised ceiling to reach its full band.
+
+### The brisk-minute counter
+
+A running box shows brisk minutes against one researched session's worth. This is the most
+actionable number in the literature: the 679-person interval-walking cohort found benefits
+**plateauing near 50 minutes of fast walking per week**, so five 3-minute intervals is a full
+session — not 90 minutes of them. Only `brisk`/`surge` blocks count, paused time never counts, and a
+gap in the belt's status stream is credited at most 5 seconds, so a stalled connection cannot invent
+minutes. A gentle drift reports no dose at all: variation is not interval training.
+
+### The research
+
+- **Interval walking training** — Hiroshi Nose and Shizue Masuki, Shinshu University. The 2007
+  randomised trial (n=246, mean age 63) found 3-minutes-fast/3-minutes-slow beat continuous walking
+  on peak aerobic capacity, leg strength and blood pressure: roughly 9% more aerobic gain, 13–17%
+  more knee extension/flexion strength, about 9/5 mmHg off blood pressure. A 679-person cohort saw
+  peak aerobic capacity rise ~14%. Karstoft et al. (2013) reproduced the fitness and glycaemic
+  effects in type 2 diabetes.
+- **Micro-surges** — Emmanuel Stamatakis et al., *Nature Medicine* (2022), on UK Biobank wearable
+  data: brief 1–2 minute vigorous bursts inside ordinary movement (VILPA). Three a day tracked with
+  ~40% lower cancer mortality and roughly half the cardiovascular mortality.
+- **Three-tier wave** — adapted from Gunnarsson and Bangsbo's 10-20-30 concept, *Journal of Applied
+  Physiology* (2012). The 3:2:1 shape is kept but stretched to minutes: the belt needs several
+  seconds just to change speed, so ten-second blocks cannot be walked here. This is a scaled
+  adaptation, not the studied protocol.
+- **Gentle drift** — the weakest evidence here, and the app says so in its own box. No trial has
+  tested a ±0.3 km/h drift; the reasoning is load rather than fitness, and treadmill-desk practice
+  is to nudge the speed rather than hold one number. Cadence research (CADENCE-Adults) puts moderate
+  intensity near 100 steps/min, which the Cadence tile shows live.
+
+The dose figures describe *scheduled* intensity, not measured effort — the belt reports no heart
+rate. Everything here is general information about published research, not medical advice.
+
+## Custom programs
+
+The **Custom program** card is for building something the boxes do not cover. Pick a shape, set the
+band, and for **Gentle drift** also the step and interval:
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| Minimum | 4.0 km/h | Bottom of the band, and where the program starts |
+| Minimum | 4.0 km/h | Bottom of the band, and where a drift starts |
 | Maximum | 5.5 km/h | Top of the band |
-| Change by | 0.1 km/h | Speed change per step |
-| Every | 2:00 | Time between changes |
+| Change by | 0.1 km/h | Speed change per step (Gentle drift only) |
+| Every | 2:00 | Time between changes (Gentle drift only) |
 
 With the defaults that produces exactly:
 
@@ -105,8 +176,11 @@ With the defaults that produces exactly:
 4.0 → 4.1 → 4.2 → … → 5.4 → 5.5 → 5.4 → 5.3 → … → 4.1 → 4.0 → 4.1 → …
 ```
 
-Endpoints are visited once per lap, not twice. A lap is 30 steps, one hour at the default interval.
-Set `Change by` equal to the whole band and you get a plain two-speed interval program instead.
+Endpoints are visited once per cycle, not twice. A cycle is 30 blocks, one hour at the default
+interval. Set `Change by` equal to the whole band and you get a plain two-speed interval instead.
+
+The other shapes carry the block timings the trials used, so `Change by` and `Every` do not apply to
+them and are hidden — only the band is yours to set.
 
 **Save** stores the current parameters as that program's defaults; **Save as…** keeps them under a new
 name, and the *Saved* menu loads or deletes them. Everything persists across launches.

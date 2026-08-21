@@ -11,6 +11,7 @@ struct DashboardView: View {
                 ConnectionBar()
                 HeroSpeedView()
                 SpeedControlView()
+                PaceAlgorithmsView()
                 ProgramView()
                 MetricsGrid()
                 CardSection(title: "Session speed", systemImage: "chart.xyaxis.line") {

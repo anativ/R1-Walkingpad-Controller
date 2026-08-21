@@ -1,7 +1,11 @@
 import SwiftUI
 import WalkingPadKit
 
-/// Editor and transport for speed programs ("algorithms").
+/// Freehand editor and transport for a hand-tuned program.
+///
+/// The research-backed protocols live in `PaceAlgorithmsView`, one box each; this is the place
+/// to build something else. Both drive the same `ProgramRunner`, so `isFreehandProgramRunning`
+/// keeps this card from claiming a run that an algorithm box started.
 struct ProgramView: View {
     @EnvironmentObject private var app: AppModel
     @State private var showingSaveAs = false
@@ -20,13 +24,13 @@ struct ProgramView: View {
 
     var body: some View {
         CardSection(
-            title: "Program",
+            title: "Custom program",
             systemImage: "chart.line.uptrend.xyaxis",
             trailing: AnyView(presetMenu)
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 kindRow
-                if app.isProgramRunning {
+                if app.isFreehandProgramRunning {
                     runningStatus
                 } else {
                     parameters
@@ -102,27 +106,31 @@ struct ProgramView: View {
                 suffix: ProgramView.programUnitLabel,
                 display: { $0 }
             )
-            stepperRow(
-                "Change by",
-                value: Binding(get: { app.program.stepKph }, set: { app.program.stepKph = $0 }),
-                range: 0.1...2.0,
-                step: 0.1,
-                format: "%.1f",
-                suffix: ProgramView.programUnitLabel,
-                display: { $0 }
-            )
-            stepperRow(
-                "Every",
-                value: Binding(
-                    get: { Double(app.program.intervalSeconds) },
-                    set: { app.program.intervalSeconds = Int($0) }
-                ),
-                range: 15...3600,
-                step: 15,
-                format: nil,
-                suffix: "min:sec",
-                display: { $0 }
-            )
+            // The researched protocols carry their own block timings — they come from the trials,
+            // not from a slider — so these two only appear for the freehand drift.
+            if app.program.kind.usesStepAndInterval {
+                stepperRow(
+                    "Change by",
+                    value: Binding(get: { app.program.stepKph }, set: { app.program.stepKph = $0 }),
+                    range: 0.1...2.0,
+                    step: 0.1,
+                    format: "%.1f",
+                    suffix: ProgramView.programUnitLabel,
+                    display: { $0 }
+                )
+                stepperRow(
+                    "Every",
+                    value: Binding(
+                        get: { Double(app.program.intervalSeconds) },
+                        set: { app.program.intervalSeconds = Int($0) }
+                    ),
+                    range: 15...3600,
+                    step: 15,
+                    format: nil,
+                    suffix: "min:sec",
+                    display: { $0 }
+                )
+            }
         }
     }
 
@@ -159,7 +167,7 @@ struct ProgramView: View {
 
     private var previewRow: some View {
         let speeds = app.program.preview(count: 6)
-        return VStack(alignment: .leading, spacing: 3) {
+        return VStack(alignment: .leading, spacing: 4) {
             if speeds.isEmpty {
                 EmptyView()
             } else {
@@ -167,8 +175,9 @@ struct ProgramView: View {
                         .joined(separator: " → ") + " → …")
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
-                Text("\(app.program.stepsPerLap) steps per lap · "
-                     + "\(Metrics.formatDuration(Int(app.program.lapDuration))) per full lap")
+                CycleStrip(blocks: app.program.cycle)
+                Text("\(app.program.blocksPerCycle) blocks per cycle · "
+                     + "\(Metrics.formatDuration(Int(app.program.cycleDuration))) per full cycle")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -178,8 +187,8 @@ struct ProgramView: View {
     private var runningStatus: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .lastTextBaseline, spacing: 6) {
-                Image(systemName: app.runner.state.ascending ? "arrow.up.right" : "arrow.down.right")
-                    .foregroundStyle(app.runner.state.ascending ? .green : .blue)
+                Image(systemName: app.runner.state.isRising ? "arrow.up.right" : "arrow.down.right")
+                    .foregroundStyle(app.runner.state.isRising ? .green : .blue)
                 Text(String(format: "%.1f", app.runner.currentKph))
                     .font(.system(size: 24, weight: .medium, design: .rounded))
                     .monospacedDigit()
@@ -187,6 +196,8 @@ struct ProgramView: View {
                 Text(ProgramView.programUnitLabel)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                StatusChip(text: app.runner.state.tier.label,
+                           tint: app.runner.state.tier.tint)
                 Spacer()
                 if app.runner.isPaused {
                     StatusChip(text: "Paused", systemImage: "pause.fill", tint: .orange)
@@ -198,19 +209,18 @@ struct ProgramView: View {
                     )
                 }
             }
-            ProgressView(value: app.runner.lapProgress())
+            ProgressView(value: app.runner.cycleProgress())
                 .progressViewStyle(.linear)
             HStack {
                 if let active = app.runner.activeProgram {
-                    Text(String(format: "%@ · %.1f–%.1f km/h · step %.1f · every %@",
+                    Text(String(format: "%@ · %.1f–%.1f km/h · %@ cycle",
                                 active.name,
                                 active.minKph,
                                 active.maxKph,
-                                active.stepKph,
-                                Metrics.formatDuration(active.intervalSeconds)))
+                                Metrics.formatDuration(Int(active.cycleDuration))))
                 }
                 Spacer()
-                Text("step \(app.runner.stepsApplied)")
+                Text("block \(app.runner.stepsApplied)")
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
@@ -223,17 +233,20 @@ struct ProgramView: View {
     private var transportRow: some View {
         HStack(spacing: 8) {
             Button {
-                app.toggleProgram()
+                // Starting from here takes over from a running algorithm box, which is what
+                // pressing Start on a different program plainly means.
+                app.isFreehandProgramRunning ? app.stopProgram() : app.startProgram()
             } label: {
                 Label(
-                    app.isProgramRunning ? "Stop program" : "Start program",
-                    systemImage: app.isProgramRunning ? "stop.fill" : "play.fill"
+                    app.isFreehandProgramRunning ? "Stop program" : "Start program",
+                    systemImage: app.isFreehandProgramRunning ? "stop.fill" : "play.fill"
                 )
                 .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .tint(app.isProgramRunning ? .red : .accentColor)
-            .disabled(!app.isConnected || (!app.isProgramRunning && !app.canStartProgram))
+            .tint(app.isFreehandProgramRunning ? .red : .accentColor)
+            .disabled(!app.isConnected
+                      || (!app.isFreehandProgramRunning && !app.canStartProgram))
 
             Button("Save") { app.saveProgram() }
                 .disabled(app.isProgramRunning || !app.program.isValid || !app.programHasUnsavedChanges)

@@ -11,11 +11,16 @@ import Foundation
 /// program rather than burning through its steps while you stand still.
 public final class ProgramRunner: ObservableObject {
     @Published public private(set) var isRunning = false
-    @Published public private(set) var state = SpeedSequence.State(raw: 0)
+    @Published public private(set) var state = SpeedSequence.State(
+        index: 0, raw: 0, seconds: 0, tier: .easy, isRising: true
+    )
     /// When the next speed change is due. Nil while paused or stopped.
     @Published public private(set) var nextChangeAt: Date?
     @Published public private(set) var stepsApplied = 0
     @Published public private(set) var isPaused = false
+    /// Seconds spent in `brisk`/`surge` blocks — the dose the interval-walking trials prescribe.
+    /// Paused time never counts, because you were standing still.
+    @Published public private(set) var workSeconds: TimeInterval = 0
     /// The program actually running, already clamped to the app's ceiling.
     @Published public private(set) var activeProgram: SpeedProgram?
     /// The program as the user wrote it. Kept so that raising the ceiling can restore the range
@@ -32,7 +37,14 @@ public final class ProgramRunner: ObservableObject {
     /// ever got going, so the belt must be still for this long before the program pauses.
     public static let pauseGraceSeconds: TimeInterval = 10
 
+    /// The most one tick may add to the work-minute total. Status frames arrive at 1 Hz, so a
+    /// larger gap means the stream stalled — crediting the whole gap would invent minutes you did
+    /// not walk.
+    public static let maxCreditedTickGap: TimeInterval = 5
+
     private var notMovingSince: Date?
+    /// When the work-minute total was last credited. Nil while paused or stopped.
+    private var lastCreditedAt: Date?
 
     public init() {}
 
@@ -56,7 +68,9 @@ public final class ProgramRunner: ObservableObject {
         isRunning = true
         isPaused = false
         notMovingSince = nil
-        nextChangeAt = now.addingTimeInterval(Double(runnable.intervalSeconds))
+        workSeconds = 0
+        lastCreditedAt = now
+        nextChangeAt = now.addingTimeInterval(Double(state.seconds))
         onNote?(String(format: "Program “%@” started at %.1f km/h", runnable.name, currentKph))
         onSpeed?(currentKph)
         return true
@@ -70,6 +84,7 @@ public final class ProgramRunner: ObservableObject {
         activeProgram = nil
         authoredProgram = nil
         notMovingSince = nil
+        lastCreditedAt = nil
         if let reason { onNote?("Program stopped: \(reason)") } else { onNote?("Program stopped") }
     }
 
@@ -86,21 +101,77 @@ public final class ProgramRunner: ObservableObject {
             return
         }
         guard runnable != current else { return }
-        activeProgram = runnable
         onNote?(String(format: "Program range now %.1f–%.1f km/h (speed ceiling)",
                        runnable.minKph, runnable.maxKph))
-        // Pull the current step back into the new band, heading away from the boundary.
-        //
+        adopt(runnable)
+    }
+
+    /// Move a running program to a new band without restarting it — the pace mode changed, or the
+    /// anchor was nudged, but the walk did not stop.
+    ///
+    /// This exists so that a meeting starting mid-session does not zero the brisk-minute total. It
+    /// deliberately refuses to change the *shape* of what is running: only the same algorithm at a
+    /// different band, never a different protocol by the back door.
+    @discardableResult
+    public func reband(to program: SpeedProgram, ceilingRaw: Int) -> Bool {
+        guard isRunning, let current = activeProgram, program.kind == current.kind,
+              program.isValid, let runnable = program.clamped(toCeilingRaw: ceilingRaw)
+        else { return false }
+        authoredProgram = program
+        guard runnable != current else { return true }
+        adopt(runnable)
+        return true
+    }
+
+    /// Take up a freshly clamped program in place of the running one.
+    ///
+    /// Clamping the band changes the cycle underneath us, so the position in it has to be re-found
+    /// rather than reused: a narrower drift has fewer blocks, and every block's speed may have
+    /// moved. `stepsApplied` and `workSeconds` carry over untouched — the session did not restart.
+    private func adopt(_ runnable: SpeedProgram) {
+        activeProgram = runnable
+        let previous = state
+        let moved = remapped(previous, into: runnable)
+        guard moved != previous else { return }
+        state = moved
+        // Keep the deadline anchored where it was, adjusted for a block of a different length, so
+        // a settings change cannot fire a speed change immediately or push one far into the future.
+        let lengthDelta = Double(moved.seconds - previous.seconds)
+        if let due = nextChangeAt, lengthDelta != 0 {
+            nextChangeAt = due.addingTimeInterval(lengthDelta)
+        }
         // While paused the belt is deliberately idle, so this must NOT command a speed: doing so
         // would physically start a stopped treadmill as a side effect of a settings change.
         // tick() re-asserts the speed on resume, so nothing is lost by staying quiet here.
-        if state.raw > runnable.maxRaw {
-            state = SpeedSequence.State(raw: runnable.maxRaw, ascending: false)
-            if !isPaused { onSpeed?(currentKph) }
-        } else if state.raw < runnable.minRaw {
-            state = SpeedSequence.State(raw: runnable.minRaw, ascending: true)
-            if !isPaused { onSpeed?(currentKph) }
+        if moved.raw != previous.raw, !isPaused { onSpeed?(currentKph) }
+    }
+
+    /// Where to stand in a freshly rebanded cycle.
+    ///
+    /// The position is matched by *block*, not by speed. Moving to a faster band shifts every speed
+    /// at once, so "the block nearest this speed" would drop you out of a fast interval and into
+    /// recovery — the old band's easy pace is the new band's brisk one. When the same block still
+    /// exists at this index, stay in it and let its speed change; only when the cycle's shape itself
+    /// changed (a narrower drift has fewer, differently placed blocks) fall back to the nearest
+    /// speed, which keeps the clamp from throwing away where you were entirely.
+    private func remapped(
+        _ state: SpeedSequence.State, into program: SpeedProgram
+    ) -> SpeedSequence.State {
+        let cycle = program.cycle
+        guard !cycle.isEmpty else { return SpeedSequence.start(of: program) }
+        if state.index >= 0, state.index < cycle.count {
+            let block = cycle[state.index]
+            if block.tier == state.tier, block.seconds == state.seconds {
+                return SpeedSequence.state(at: state.index, in: program, wasRising: state.isRising)
+            }
         }
+        var bestIndex = 0
+        var bestDistance = Int.max
+        for (index, block) in cycle.enumerated() where abs(block.raw - state.raw) < bestDistance {
+            bestDistance = abs(block.raw - state.raw)
+            bestIndex = index
+        }
+        return SpeedSequence.state(at: bestIndex, in: program, wasRising: state.isRising)
     }
 
     /// Advance the program. Call once per belt status frame.
@@ -119,6 +190,7 @@ public final class ProgramRunner: ObservableObject {
             if !isPaused, now.timeIntervalSince(since) >= ProgramRunner.pauseGraceSeconds {
                 isPaused = true
                 nextChangeAt = nil
+                lastCreditedAt = nil
                 onNote?("Program paused — belt is not moving")
             }
             return
@@ -127,15 +199,19 @@ public final class ProgramRunner: ObservableObject {
 
         if isPaused {
             isPaused = false
-            nextChangeAt = now.addingTimeInterval(Double(program.intervalSeconds))
+            nextChangeAt = now.addingTimeInterval(Double(state.seconds))
+            lastCreditedAt = now
             onNote?("Program resumed")
             // Re-assert the speed the program expects, in case it was changed while paused.
             onSpeed?(currentKph)
             return
         }
 
+        // Credit the time just elapsed to the block we were actually in, before advancing out of it.
+        creditWork(upTo: now)
+
         guard let due = nextChangeAt else {
-            nextChangeAt = now.addingTimeInterval(Double(program.intervalSeconds))
+            nextChangeAt = now.addingTimeInterval(Double(state.seconds))
             return
         }
         guard now >= due else { return }
@@ -143,11 +219,18 @@ public final class ProgramRunner: ObservableObject {
         state = SpeedSequence.next(state, in: program)
         stepsApplied += 1
         // Schedule from the deadline, not from now, so a late tick does not drift the programme.
-        // If we are more than one interval late (a long stall), restart the clock from now.
-        let interval = Double(program.intervalSeconds)
-        let nextDue = due.addingTimeInterval(interval)
-        nextChangeAt = nextDue > now ? nextDue : now.addingTimeInterval(interval)
+        // If that would already be in the past (a long stall), restart the clock from now.
+        let nextDue = due.addingTimeInterval(Double(state.seconds))
+        nextChangeAt = nextDue > now ? nextDue : now.addingTimeInterval(Double(state.seconds))
         onSpeed?(currentKph)
+    }
+
+    private func creditWork(upTo now: Date) {
+        defer { lastCreditedAt = now }
+        guard let last = lastCreditedAt, state.tier.isWork else { return }
+        let elapsed = now.timeIntervalSince(last)
+        guard elapsed > 0 else { return }
+        workSeconds += min(elapsed, ProgramRunner.maxCreditedTickGap)
     }
 
     /// Seconds until the next change, for the UI. Nil while paused or stopped.
@@ -158,10 +241,25 @@ public final class ProgramRunner: ObservableObject {
 
     public var currentKph: Double { Double(state.raw) / 10 }
 
-    /// Progress through the current lap, 0...1, for a progress bar.
-    public func lapProgress() -> Double {
-        guard let program = activeProgram, program.maxRaw > program.minRaw else { return 0 }
-        let span = Double(program.maxRaw - program.minRaw)
-        return min(1, max(0, Double(state.raw - program.minRaw) / span))
+    /// Progress through the current cycle, 0...1, for a progress bar. Measured in time rather than
+    /// in speed, because a cycle's blocks are not all the same length.
+    public func cycleProgress(now: Date = Date()) -> Double {
+        guard let program = activeProgram else { return 0 }
+        let cycle = program.cycle
+        let total = program.cycleDuration
+        guard total > 0, state.index >= 0, state.index < cycle.count else { return 0 }
+        let before = cycle.prefix(state.index).reduce(0) { $0 + $1.seconds }
+        let remaining = Double(secondsUntilNextChange(now: now) ?? state.seconds)
+        let intoBlock = max(0, Double(state.seconds) - remaining)
+        return min(1, max(0, (Double(before) + intoBlock) / total))
+    }
+
+    /// How much of the researched per-session dose of brisk walking has been done, 0...1.
+    /// Nil for programs no trial has prescribed a dose for.
+    public var doseProgress: Double? {
+        guard let kind = activeProgram?.kind,
+              let target = PaceAlgorithm.named(kind)?.sessionWorkSeconds, target > 0
+        else { return nil }
+        return min(1, workSeconds / Double(target))
     }
 }

@@ -220,10 +220,11 @@ func notFoundIsTerminalAndExplained() throws {
 
 // MARK: - Speed programs ("algorithms")
 
-/// The exact series requested: 4.0, 4.1, 4.2 … 5.5, 5.4, 5.3 … 4.0, 4.1 …
-/// with the endpoints visited once per lap, not twice.
-func upDownProducesRequestedSeries() throws {
+/// The exact series the drift was specified with: 4.0, 4.1, 4.2 … 5.5, 5.4, 5.3 … 4.0, 4.1 …
+/// with the endpoints visited once per cycle, not twice.
+func driftProducesRequestedSeries() throws {
     let program = SpeedProgram.standard   // 4.0–5.5, 0.1 step, 2 min
+    check(program.kind == .gentleDrift)
     check(program.minKph == 4.0)
     check(program.maxKph == 5.5)
     check(program.stepKph == 0.1)
@@ -246,12 +247,14 @@ func upDownProducesRequestedSeries() throws {
     // Never outside the configured band.
     check(series.allSatisfy { $0 >= 40 && $0 <= 55 }, "series left its band")
 
-    // One full lap is 30 steps for this configuration (15 up + 15 down).
-    check(program.stepsPerLap == 30, "stepsPerLap was \(program.stepsPerLap)")
+    // One full cycle is 30 blocks for this configuration (15 up + 15 down), each 2 minutes.
+    check(program.blocksPerCycle == 30, "blocksPerCycle was \(program.blocksPerCycle)")
+    check(program.cycleDuration == 3600, "cycleDuration was \(program.cycleDuration)")
+    check(program.cycle.allSatisfy { $0.seconds == 120 }, "a drift's blocks are all one interval")
 }
 
 /// Integer units mean no floating-point drift: every value is an exact multiple of 0.1.
-func upDownHasNoFloatingPointDrift() throws {
+func driftHasNoFloatingPointDrift() throws {
     let program = SpeedProgram.standard
     var state = SpeedSequence.start(of: program)
     for _ in 0..<500 {
@@ -262,7 +265,7 @@ func upDownHasNoFloatingPointDrift() throws {
 }
 
 /// A step that does not divide the band evenly must land exactly on the endpoints, not overshoot.
-func upDownClampsUnevenSteps() throws {
+func driftClampsUnevenSteps() throws {
     var program = SpeedProgram.standard
     program.stepRaw = 4               // 0.4 km/h across a 1.5 km/h band
     var state = SpeedSequence.start(of: program)
@@ -273,6 +276,26 @@ func upDownClampsUnevenSteps() throws {
     }
     check(Array(series.prefix(6)) == [40, 44, 48, 52, 55, 51], "uneven step series: \(series)")
     check(series.allSatisfy { $0 >= 40 && $0 <= 55 }, "uneven step left the band")
+    check(program.blocksPerCycle == 8, "blocksPerCycle was \(program.blocksPerCycle)")
+}
+
+/// A drift is variation, not interval training. Labelling its top step as brisk would quietly
+/// inflate the researched hard-minute dose with minutes nobody prescribed.
+func driftNeverClaimsBriskWork() throws {
+    // Written out rather than chained: `named(...)?.sessionWorkSeconds == nil` compares the OUTER
+    // optional of an Int??, so it would pass even if the drift did advertise a dose.
+    let drift = try require(PaceAlgorithm.named(.gentleDrift))
+    check(drift.sessionWorkSeconds == nil, "a drift must not advertise a researched dose")
+    for anchor in [20, 38, 50, 65] {
+        let program = SpeedProgram(kind: .gentleDrift, minRaw: anchor - 3, maxRaw: anchor + 3)
+        check(program.workSecondsPerCycle == 0,
+              "drift at \(anchor) claimed \(program.workSecondsPerCycle)s of work")
+        check(program.cycle.allSatisfy { !$0.tier.isWork })
+    }
+    // Even a wide hand-authored drift stays out of the dose.
+    var wide = SpeedProgram.standard
+    wide.maxRaw = 80
+    check(wide.workSecondsPerCycle == 0, "a wide drift must still claim no dose")
 }
 
 func programValidationRejectsNonsense() throws {
@@ -284,9 +307,22 @@ func programValidationRejectsNonsense() throws {
     check(!p.isValid, "empty band must be rejected")
     p = SpeedProgram.standard; p.intervalSeconds = 1
     check(!p.isValid, "sub-5s interval must be rejected")
-    // An invalid program must not move.
-    let stuck = SpeedSequence.next(SpeedSequence.State(raw: 40), in: p)
+    // An invalid program must not move — not its speed, and not its place in the cycle.
+    let stuck = SpeedSequence.next(
+        SpeedSequence.State(index: 3, raw: 40, seconds: 120, tier: .easy, isRising: true), in: p
+    )
     check(stuck.raw == 40, "invalid program must not advance")
+    check(stuck.index == 3, "invalid program must not move in its cycle")
+    check(p.cycle.isEmpty, "an invalid program has no cycle to run")
+
+    // The researched protocols carry their own block timings, so a nonsense interval or step —
+    // fields they never read — must not make them unrunnable.
+    var interval = PaceAlgorithm.all[0].program(anchorRaw: 38)
+    check(interval.kind != .gentleDrift)
+    interval.intervalSeconds = 1
+    interval.stepRaw = 0
+    check(interval.isValid, "a protocol must not be invalidated by fields it does not use")
+    check(!interval.cycle.isEmpty)
 }
 
 /// The app's speed ceiling must win over the program's maximum.
@@ -303,6 +339,365 @@ func programRespectsSpeedCeiling() throws {
     }
     // A ceiling below the minimum leaves no runnable range at all.
     check(program.clamped(toCeilingRaw: 30) == nil, "ceiling under the band must not run")
+}
+
+// MARK: - Research-backed pace algorithms
+
+/// Interval walking is the flagship, so its numbers must be the ones the trials used: three
+/// minutes fast, three minutes slow, and five cycles to one researched session.
+func intervalWalkMatchesTheResearchedProtocol() throws {
+    let algorithm = try require(PaceAlgorithm.named(.intervalWalk))
+    let program = algorithm.program(anchorRaw: PaceMode.work.defaultAnchorRaw)
+    check(program.minRaw == 34 && program.maxRaw == 46,
+          "working band was \(program.minRaw)–\(program.maxRaw)")
+
+    let cycle = program.cycle
+    check(cycle.count == 2, "cycle had \(cycle.count) blocks")
+    check(cycle[0].tier == .brisk, "the fast block comes first")
+    check(cycle[0].seconds == 180, "fast block was \(cycle[0].seconds)s, not the trials' 3 minutes")
+    check(cycle[0].raw == 46, "fast block should sit at the top of the band")
+    check(cycle[1].tier == .easy)
+    check(cycle[1].seconds == 180, "slow block was \(cycle[1].seconds)s")
+    check(cycle[1].raw == 34, "slow block should sit at the bottom of the band")
+    check(program.cycleDuration == 360)
+    check(program.workSecondsPerCycle == 180)
+
+    // Nose and Masuki prescribed five cycles — 30 minutes — as a session.
+    let dose = try require(algorithm.sessionWorkSeconds)
+    check(dose == 900, "session dose was \(dose)s")
+    check(dose / program.workSecondsPerCycle == 5, "a session should be five cycles")
+}
+
+/// VILPA measured bursts of one to two minutes, a few times a day. A burst outside that window is
+/// either too short for the belt to reach the speed, or no longer the thing that was studied.
+func microSurgesKeepBurstsInsideTheStudiedWindow() throws {
+    let algorithm = try require(PaceAlgorithm.named(.microSurges))
+    let program = algorithm.program(anchorRaw: PaceMode.work.defaultAnchorRaw)
+    let cycle = program.cycle
+
+    let surges = cycle.filter { $0.tier == .surge }
+    check(surges.count == 1, "expected one burst per cycle, got \(surges.count)")
+    for surge in surges {
+        check(surge.seconds >= 60 && surge.seconds <= 120,
+              "burst of \(surge.seconds)s is outside the studied 1–2 minute window")
+    }
+    check(program.cycleDuration == 720, "cycle was \(program.cycleDuration)s")
+    check(program.workSecondsPerCycle == 90)
+
+    // The whole point is that you can keep typing through nearly all of it.
+    let easy = cycle.filter { $0.tier == .easy }.reduce(0) { $0 + $1.seconds }
+    check(Double(easy) / program.cycleDuration >= 0.85,
+          "only \(Double(easy) / program.cycleDuration) of the cycle is easy")
+
+    // A 90-minute desk walk should land near the studied handful of bursts, not dozens.
+    let burstsIn90Minutes = Int(90 * 60 / program.cycleDuration)
+    check(burstsIn90Minutes >= 3 && burstsIn90Minutes <= 10,
+          "\(burstsIn90Minutes) bursts in 90 minutes is not the studied dose")
+}
+
+/// The long session banks one researched dose and then stops adding hard minutes — the point of it
+/// is that ninety unbroken minutes of brisk work is more than any trial prescribed.
+func longDeskSessionBanksOneDoseThenCruises() throws {
+    let algorithm = try require(PaceAlgorithm.named(.longDeskSession))
+    let program = algorithm.program(anchorRaw: PaceMode.work.defaultAnchorRaw)
+    check(program.cycleDuration == 3600, "cycle was \(program.cycleDuration)s")
+    check(program.workSecondsPerCycle == 900, "work was \(program.workSecondsPerCycle)s")
+    check(program.workSecondsPerCycle == algorithm.sessionWorkSeconds,
+          "one cycle should be exactly one researched session")
+
+    let cycle = program.cycle
+    check(cycle.count == 16, "cycle had \(cycle.count) blocks")
+    // The interval half comes first, so the dose is banked before the cruising starts.
+    check(cycle.prefix(10).allSatisfy { $0.seconds == 180 }, "the dose is ten 3-minute blocks")
+    check(cycle.prefix(10).filter { $0.tier.isWork }.count == 5, "five fast blocks")
+    check(cycle.suffix(6).allSatisfy { !$0.tier.isWork }, "the cruise must add no hard minutes")
+    // Two hours is two doses, not forty-five minutes of brisk walking.
+    check(Int(2 * 3600 / program.cycleDuration) == 2)
+}
+
+/// No block may be shorter than the belt needs to actually get there. `CommandQueue` spaces writes
+/// about 0.7s apart and the belt then ramps, so a 10-second block — the literal 10-20-30 protocol —
+/// would be a speed the belt never reaches.
+func everyBlockIsLongEnoughForTheBeltToReach() throws {
+    for algorithm in PaceAlgorithm.all {
+        for anchor in [PaceMode.work.defaultAnchorRaw, PaceMode.meeting.defaultAnchorRaw] {
+            for block in algorithm.program(anchorRaw: anchor).cycle {
+                check(block.seconds >= 60,
+                      "\(algorithm.name) has a \(block.seconds)s block — too short to reach")
+            }
+        }
+    }
+}
+
+/// Every block of every algorithm, at every anchor either mode allows, must sit inside the
+/// program's own band — that is what makes clamping the band a complete guarantee.
+func everyAlgorithmStaysInsideItsBand() throws {
+    let floorRaw = SpeedProgram.raw(SpeedLimits.minRunningKph)
+    let walkingCeiling = SpeedProgram.raw(SpeedLimits.defaultWalkingCeilingKph)
+    let hardMax = SpeedProgram.raw(SpeedLimits.hardMaxKph)
+
+    for algorithm in PaceAlgorithm.all {
+        for mode in PaceMode.allCases {
+            for anchor in [mode.anchorRange.lowerBound, mode.defaultAnchorRaw,
+                           mode.anchorRange.upperBound] {
+                let program = algorithm.program(anchorRaw: anchor)
+                check(program.isValid, "\(algorithm.name) invalid at anchor \(anchor)")
+                check(program.minRaw >= floorRaw,
+                      "\(algorithm.name) at \(anchor) starts below the belt's minimum")
+                for block in program.cycle {
+                    check(block.raw >= program.minRaw && block.raw <= program.maxRaw,
+                          "\(algorithm.name) block \(block.raw) is outside "
+                          + "\(program.minRaw)–\(program.maxRaw)")
+                }
+                // Whatever the anchor, the ceiling in force is the last word.
+                for ceiling in [walkingCeiling, hardMax] {
+                    guard let fitted = program.clamped(toCeilingRaw: ceiling) else { continue }
+                    for block in fitted.cycle {
+                        check(block.raw <= ceiling,
+                              "\(algorithm.name) commanded \(block.raw) above ceiling \(ceiling)")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Switching mode shifts every algorithm together and keeps the shape each protocol was studied
+/// with: same blocks, same durations, same band width — just faster.
+func paceModesShiftEveryAlgorithmTogether() throws {
+    check(PaceMode.work.defaultAnchorRaw == 38, "Working mode is built around 3.8 km/h")
+    check(PaceMode.meeting.defaultAnchorRaw == 50, "Meeting mode is built around 5.0 km/h")
+    check(PaceMode.meeting.defaultAnchorRaw > PaceMode.work.defaultAnchorRaw,
+          "a meeting is the faster mode")
+
+    for mode in PaceMode.allCases {
+        check(mode.anchorRange.contains(mode.defaultAnchorRaw),
+              "\(mode.label) default anchor is outside its own range")
+        check(mode.anchorRange.upperBound <= SpeedProgram.raw(SpeedLimits.hardMaxKph),
+              "\(mode.label) anchor could exceed the hardware maximum")
+    }
+
+    for algorithm in PaceAlgorithm.all {
+        let work = algorithm.program(anchorRaw: PaceMode.work.defaultAnchorRaw)
+        let meeting = algorithm.program(anchorRaw: PaceMode.meeting.defaultAnchorRaw)
+        check(meeting.minRaw > work.minRaw, "\(algorithm.name): meeting must be faster at the bottom")
+        check(meeting.maxRaw > work.maxRaw, "\(algorithm.name): meeting must be faster at the top")
+        check(meeting.maxRaw - meeting.minRaw == work.maxRaw - work.minRaw,
+              "\(algorithm.name): the band width must survive the shift")
+        check(meeting.cycle.count == work.cycle.count,
+              "\(algorithm.name): the block count must survive the shift")
+        let shapeSurvived = zip(work.cycle, meeting.cycle).allSatisfy { pair in
+            pair.0.seconds == pair.1.seconds && pair.0.tier == pair.1.tier
+        }
+        check(shapeSurvived, "\(algorithm.name): the shape must survive the shift")
+    }
+}
+
+/// Working mode has one job: stay slow enough to keep typing accurate. If an algorithm's easy pace
+/// creeps up, the mode has stopped being a working mode.
+func workingModeStaysTypeable() throws {
+    for algorithm in PaceAlgorithm.all {
+        let program = algorithm.program(anchorRaw: PaceMode.work.defaultAnchorRaw)
+        check(program.raw(for: .easy) <= 40,
+              "\(algorithm.name) types at \(program.raw(for: .easy)) — too fast for a keyboard")
+        check(program.maxRaw <= 52,
+              "\(algorithm.name) tops out at \(program.maxRaw) in Working mode")
+        // And a meeting must not need Run mode just to exist at the default ceiling.
+        let meeting = algorithm.program(anchorRaw: PaceMode.meeting.defaultAnchorRaw)
+        check(meeting.clamped(
+            toCeilingRaw: SpeedProgram.raw(SpeedLimits.defaultWalkingCeilingKph)
+        ) != nil, "\(algorithm.name) cannot run in Meeting mode at the default ceiling")
+    }
+}
+
+/// Every algorithm needs a distinct kind, a description, and a band — and every program kind needs
+/// a box, or it is unreachable from the algorithm list.
+func everyAlgorithmIsDistinctAndDescribed() throws {
+    check(PaceAlgorithm.all.count >= 3, "the point was several algorithms to choose between")
+    check(Set(PaceAlgorithm.all.map(\.kind)).count == PaceAlgorithm.all.count,
+          "two algorithms share a kind")
+    for kind in SpeedProgram.Kind.allCases {
+        check(PaceAlgorithm.named(kind) != nil, "\(kind.label) has no algorithm entry")
+    }
+    for algorithm in PaceAlgorithm.all {
+        check(!algorithm.goal.isEmpty, "\(algorithm.name) has no goal")
+        check(!algorithm.evidence.isEmpty, "\(algorithm.name) has no evidence")
+        check(!algorithm.cadence.isEmpty, "\(algorithm.name) has no cadence note")
+        check(algorithm.highOffset > algorithm.lowOffset, "\(algorithm.name) has an empty band")
+    }
+    // Programs saved by earlier builds decode by raw value; renaming this orphans all of them.
+    check(SpeedProgram.Kind.gentleDrift.rawValue == "upDown",
+          "the drift's raw value must not change")
+}
+
+/// The runner must honour each block's own length. A cycle of 10½ minutes easy and 90 seconds hard
+/// is the whole point of the block model — a single shared interval could not express it.
+func runnerHonoursVariableBlockLengths() throws {
+    let runner = ProgramRunner()
+    var applied: [Double] = []
+    runner.onSpeed = { applied.append($0) }
+    let t0 = Date(timeIntervalSince1970: 5_000_000)
+    let program = try require(PaceAlgorithm.named(.microSurges))
+        .program(anchorRaw: PaceMode.work.defaultAnchorRaw)   // 3.5 easy / 5.0 surge
+
+    check(runner.start(program, ceilingRaw: 100, now: t0))
+    check(applied == [3.5], "must start on the easy block, got \(applied)")
+    check(runner.state.tier == .easy)
+
+    // The easy stretch is 10½ minutes, not a drift's two.
+    runner.tick(beltIsMoving: true, now: t0.addingTimeInterval(629))
+    check(applied.count == 1, "surged early")
+    runner.tick(beltIsMoving: true, now: t0.addingTimeInterval(630))
+    check(applied.last == 5.0, "expected the surge, got \(String(describing: applied.last))")
+    check(runner.state.tier == .surge)
+
+    // And the surge is 90 seconds, not another 10½ minutes.
+    runner.tick(beltIsMoving: true, now: t0.addingTimeInterval(719))
+    check(applied.count == 2, "surge ended early")
+    runner.tick(beltIsMoving: true, now: t0.addingTimeInterval(720))
+    check(applied.last == 3.5, "the surge must end after 90s")
+    check(runner.state.index == 0, "the cycle must wrap round")
+}
+
+/// The brisk-minute total is the researched dose, so only genuinely hard blocks may count — and
+/// standing still may never count, however long you stand.
+func runnerCountsOnlyBriskMinutes() throws {
+    let runner = ProgramRunner()
+    let t0 = Date(timeIntervalSince1970: 6_000_000)
+    let program = try require(PaceAlgorithm.named(.intervalWalk))
+        .program(anchorRaw: PaceMode.work.defaultAnchorRaw)
+    check(runner.start(program, ceilingRaw: 100, now: t0))
+    check(runner.state.tier == .brisk, "an interval walk starts on the fast block")
+    check(runner.workSeconds == 0)
+
+    // One tick per second, as the belt's own 1 Hz status stream delivers them.
+    for second in 1...180 {
+        runner.tick(beltIsMoving: true, now: t0.addingTimeInterval(Double(second)))
+    }
+    check(abs(runner.workSeconds - 180) < 1.5,
+          "expected ~180 brisk seconds, got \(runner.workSeconds)")
+    check(runner.state.tier == .easy, "should have handed over to the easy block")
+
+    // The easy block adds nothing.
+    for second in 181...360 {
+        runner.tick(beltIsMoving: true, now: t0.addingTimeInterval(Double(second)))
+    }
+    check(abs(runner.workSeconds - 180) < 1.5,
+          "easy minutes must not count: \(runner.workSeconds)")
+
+    // Nor does standing still, however long for.
+    let stopped = t0.addingTimeInterval(361)
+    runner.tick(beltIsMoving: false, now: stopped)
+    runner.tick(beltIsMoving: false, now: stopped.addingTimeInterval(30))
+    check(runner.isPaused)
+    runner.tick(beltIsMoving: true, now: stopped.addingTimeInterval(3600))
+    check(abs(runner.workSeconds - 180) < 1.5,
+          "paused time was credited: \(runner.workSeconds)")
+
+    // A stalled status stream must not invent minutes either.
+    let stalled = ProgramRunner()
+    check(stalled.start(program, ceilingRaw: 100, now: t0))
+    stalled.tick(beltIsMoving: true, now: t0.addingTimeInterval(120))
+    check(stalled.workSeconds <= ProgramRunner.maxCreditedTickGap,
+          "a 120s gap credited \(stalled.workSeconds)s of walking that did not happen")
+
+    // The dose readout is a fraction of the researched session, never more than complete.
+    check(runner.doseProgress != nil, "an interval walk has a researched dose")
+    check(try require(runner.doseProgress) <= 1)
+    let drift = ProgramRunner()
+    check(drift.start(SpeedProgram.standard, ceilingRaw: 100, now: t0))
+    check(drift.doseProgress == nil, "a drift must not report progress toward a dose")
+}
+
+/// Progress through a cycle has to be measured in time. Counting blocks would show a micro-surge
+/// jumping from 0% to 50% after ten minutes and then to 100% ninety seconds later.
+func cycleProgressTracksTimeNotBlocks() throws {
+    let runner = ProgramRunner()
+    let t0 = Date(timeIntervalSince1970: 8_000_000)
+    let program = try require(PaceAlgorithm.named(.microSurges))
+        .program(anchorRaw: PaceMode.work.defaultAnchorRaw)
+    check(runner.start(program, ceilingRaw: 100, now: t0))
+    check(runner.cycleProgress(now: t0) == 0)
+
+    let halfway = runner.cycleProgress(now: t0.addingTimeInterval(315))
+    check(abs(halfway - 315.0 / 720.0) < 0.02,
+          "315s into a 720s cycle read as \(halfway)")
+
+    runner.tick(beltIsMoving: true, now: t0.addingTimeInterval(630))
+    let intoSurge = runner.cycleProgress(now: t0.addingTimeInterval(675))
+    check(abs(intoSurge - 675.0 / 720.0) < 0.02,
+          "675s into a 720s cycle read as \(intoSurge)")
+}
+
+/// Clamping the band must not move you to a different *kind* of block. Dropping out of Run mode
+/// during a fast interval should slow the interval, not cut it short or turn it into recovery.
+func ceilingRemapKeepsABriskBlockBrisk() throws {
+    let runner = ProgramRunner()
+    var applied: [Double] = []
+    runner.onSpeed = { applied.append($0) }
+    let t0 = Date(timeIntervalSince1970: 7_000_000)
+    let program = try require(PaceAlgorithm.named(.intervalWalk))
+        .program(anchorRaw: PaceMode.meeting.defaultAnchorRaw)   // 4.6 – 5.8
+
+    check(runner.start(program, ceilingRaw: 100, now: t0))
+    check(runner.state.tier == .brisk)
+    check(applied == [5.8], "expected the fast block, got \(applied)")
+
+    runner.applyCeiling(50)
+    check(runner.state.tier == .brisk, "a ceiling change must not change the kind of block")
+    check(runner.currentKph == 5.0, "expected the clamped fast pace, got \(runner.currentKph)")
+    check(applied.last == 5.0, "the belt has to be told about the clamp")
+    // Same block, same length, so the schedule is untouched.
+    check(runner.secondsUntilNextChange(now: t0.addingTimeInterval(60)) == 120,
+          "the deadline moved: \(String(describing: runner.secondsUntilNextChange(now: t0.addingTimeInterval(60))))")
+}
+
+/// Switching mode mid-walk must reband the running algorithm, not restart it: the brisk minutes
+/// already walked are the researched dose, and losing them would misreport the session.
+func rebandKeepsTheDoseAndRefusesAShapeChange() throws {
+    let runner = ProgramRunner()
+    var applied: [Double] = []
+    runner.onSpeed = { applied.append($0) }
+    let t0 = Date(timeIntervalSince1970: 10_000_000)
+    let interval = try require(PaceAlgorithm.named(.intervalWalk))
+    let working = interval.program(anchorRaw: PaceMode.work.defaultAnchorRaw)      // 3.4 – 4.6
+    let meeting = interval.program(anchorRaw: PaceMode.meeting.defaultAnchorRaw)   // 4.6 – 5.8
+
+    check(runner.start(working, ceilingRaw: 100, now: t0))
+    for second in 1...120 {
+        runner.tick(beltIsMoving: true, now: t0.addingTimeInterval(Double(second)))
+    }
+    let banked = runner.workSeconds
+    check(abs(banked - 120) < 1.5, "expected ~120 brisk seconds, got \(banked)")
+    let stepsBefore = runner.stepsApplied
+
+    // A meeting starts: same protocol, faster band.
+    check(runner.reband(to: meeting, ceilingRaw: 100))
+    check(try require(runner.activeProgram).maxRaw == 58, "band did not move")
+    check(abs(runner.workSeconds - banked) < 0.01, "rebanding reset the dose")
+    check(runner.stepsApplied == stepsBefore, "rebanding restarted the cycle")
+    check(runner.state.tier == .brisk, "rebanding must keep the block")
+    check(applied.last == 5.8, "the new band has to reach the belt")
+    // The block was 2 of its 3 minutes in; it must still finish on time, not start over.
+    check(runner.secondsUntilNextChange(now: t0.addingTimeInterval(120)) == 60,
+          "the deadline moved: \(String(describing: runner.secondsUntilNextChange(now: t0.addingTimeInterval(120))))")
+
+    // Rebanding may only change the band. A different protocol has to go through start().
+    let surges = try require(PaceAlgorithm.named(.microSurges))
+        .program(anchorRaw: PaceMode.work.defaultAnchorRaw)
+    check(!runner.reband(to: surges, ceilingRaw: 100),
+          "rebanding must not smuggle in a different algorithm")
+    check(try require(runner.activeProgram).kind == .intervalWalk)
+
+    // And the ceiling still wins over a reband.
+    check(runner.reband(to: meeting, ceilingRaw: 50))
+    check(try require(runner.activeProgram).maxRaw == 50, "the ceiling must clamp a reband")
+    check(!runner.reband(to: meeting, ceilingRaw: 20),
+          "a ceiling with no room must refuse rather than run out of range")
+
+    // A stopped runner has nothing to reband.
+    runner.stop()
+    check(!runner.reband(to: meeting, ceilingRaw: 100))
 }
 
 /// The runner pauses with the belt, resumes where it left off, and never drifts its schedule.
@@ -781,7 +1176,7 @@ func walkRecordsTheProgramThatStartedIt() throws {
     let recorder = SessionRecorder(idleTimeout: 30, minimumDuration: 30, minimumSteps: 20)
     let t0 = Date(timeIntervalSince1970: 8_000_000)
 
-    recorder.programName = "Up / down"
+    recorder.programName = "Interval walk"
     _ = recorder.ingest(frame(elapsed: 0, distanceRaw: 0, steps: 0, speedRaw: 30), now: t0)
     for i in 1...5 {
         _ = recorder.ingest(
@@ -791,7 +1186,7 @@ func walkRecordsTheProgramThatStartedIt() throws {
     // The program ends part-way through; the person keeps walking.
     recorder.programName = nil
     let walk = try require(recorder.finish(now: t0.addingTimeInterval(400)))
-    check(walk.programName == "Up / down",
+    check(walk.programName == "Interval walk",
           "expected the starting program, got \(walk.programName ?? "nil")")
 }
 

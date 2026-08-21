@@ -63,6 +63,24 @@ struct WalkingPadApp: App {
                     .keyboardShortcut("p", modifiers: [.command])
                     .disabled(!app.isConnected || (!app.isProgramRunning && !app.canStartProgram))
                 Divider()
+                // Switching to Meeting mode is the thing you reach for while a meeting is starting,
+                // so it has to be doable without finding and focusing the window.
+                Picker("Pace mode", selection: Binding(
+                    get: { app.settings.paceMode },
+                    set: { app.setPaceMode($0) }
+                )) {
+                    ForEach(PaceMode.allCases) { Text($0.label).tag($0) }
+                }
+                Menu("Pace algorithm") {
+                    ForEach(PaceAlgorithm.all) { algorithm in
+                        Button(app.isRunning(algorithm) ? "Stop \(algorithm.name)" : algorithm.name) {
+                            app.toggleAlgorithm(algorithm)
+                        }
+                        .disabled(!app.isConnected
+                                  || (!app.isRunning(algorithm) && !app.canStart(algorithm)))
+                    }
+                }
+                Divider()
                 ForEach(PadMode.allCases, id: \.self) { mode in
                     Button("Mode: \(mode.label)") { app.setMode(mode) }
                         .disabled(!app.isConnected)
@@ -173,12 +191,19 @@ private struct MenuBarContent: View {
             Text(app.controller.state.label)
         }
         if app.isProgramRunning {
+            let label = app.runningAlgorithm?.name ?? "Program"
             if let seconds = app.runner.secondsUntilNextChange() {
-                Text(String(format: "Program: %.1f km/h · next in %@",
+                Text(String(format: "%@: %.1f km/h %@ · next in %@",
+                            label,
                             app.runner.currentKph,
+                            app.runner.state.tier.label,
                             Metrics.formatDuration(seconds)))
             } else {
-                Text("Program paused")
+                Text("\(label) paused")
+            }
+            if let target = app.runningAlgorithm?.sessionWorkSeconds {
+                Text("Brisk \(Metrics.formatDuration(Int(app.runner.workSeconds)))"
+                     + " of \(Metrics.formatDuration(target)) · \(app.settings.paceMode.label)")
             }
         }
         Divider()
