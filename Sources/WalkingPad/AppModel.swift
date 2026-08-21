@@ -142,15 +142,22 @@ final class AppModel: ObservableObject {
             let ceiling = SpeedLimits.effectiveCeiling(
                 walkingCeilingKph: newValue.speedCeilingKph, isRunningMode: newValue.isRunningMode
             )
-            if desiredSpeedKph > ceiling {
-                desiredSpeedKph = ceiling
-                // The ceiling is a safety limit, so it has to reach a belt that is already moving —
-                // not just the on-screen number. Sent through the controller directly so that
-                // lowering the ceiling is not mistaken for the manual override that ends a program.
-                if !runner.isRunning { sendSpeedToBelt(ceiling, mayStartBelt: false) }
+            if desiredSpeedKph > ceiling { desiredSpeedKph = ceiling }
+
+            // A running program adopts the new band first, and reports whether it is still driving.
+            let programStillDriving = runner.applyCeiling(SpeedProgram.raw(ceiling))
+
+            // Then the ceiling is enforced against the belt itself. This must NOT be skipped just
+            // because a program was running: `applyCeiling` stops a program whose band no longer
+            // fits, and stopping commands no speed, so the belt would have kept its old pace while
+            // the UI showed the new limit. Sent through the controller directly, so that lowering
+            // the ceiling is not mistaken for the manual override that ends a program.
+            if !programStillDriving, isConnected, isMoving, beltSpeedKph > ceiling {
+                controller.appendLog(
+                    String(format: "Ceiling lowered to %.1f km/h — slowing the belt", ceiling), .warning
+                )
+                sendSpeedToBelt(ceiling, mayStartBelt: false)
             }
-            // A running program must respect a ceiling the user lowers underneath it.
-            runner.applyCeiling(SpeedProgram.raw(ceiling))
         }
     }
 

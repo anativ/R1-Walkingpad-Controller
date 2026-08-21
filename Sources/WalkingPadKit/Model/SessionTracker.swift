@@ -26,7 +26,7 @@ public final class SessionTracker: ObservableObject {
     /// Window used for the cadence estimate.
     private static let cadenceWindow: TimeInterval = 20
     /// Largest belt-clock gap we will still count toward calories.
-    private static let maxCreditedGapSeconds: Double = 120
+    private static let maxCreditedGapSeconds: Double = Metrics.maxCreditedGapSeconds
 
     public init(profile: UserProfile = UserProfile()) {
         self.profile = profile

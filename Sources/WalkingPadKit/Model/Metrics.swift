@@ -65,7 +65,12 @@ public enum Metrics {
             + ((velocity * velocity) / heightM) * 0.029 * profile.weightKg
     }
 
-    /// Minutes per km. Returns nil when stopped.
+    /// Largest gap in the belt's clock that still counts toward accumulated figures.
+    ///
+    /// Reconnecting to a belt already mid-session shows up as a huge jump, and crediting it would
+    /// invent calories nobody burned. One definition, shared by the live tracker and the recorder.
+    public static let maxCreditedGapSeconds: Double = 120
+
     /// Resting energy expenditure, kcal per minute, from the Mifflin-St Jeor equation.
     ///
     /// This is the baseline your body burns anyway. Subtracting it turns the gross figure into the
@@ -90,6 +95,7 @@ public enum Metrics {
         return max(0, gross - resting)
     }
 
+    /// Minutes per km. Returns nil when stopped.
     public static func pace(speedKph: Double) -> Double? {
         guard speedKph > 0.05 else { return nil }
         return 60.0 / speedKph

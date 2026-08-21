@@ -92,18 +92,25 @@ public final class ProgramRunner: ObservableObject {
     /// the user lowers the ceiling mid-session. Without this the program would keep stepping toward
     /// its old maximum while the belt silently clamped, so the displayed step and the belt's real
     /// speed would disagree.
-    public func applyCeiling(_ ceilingRaw: Int) {
-        guard isRunning, let authored = authoredProgram, let current = activeProgram else { return }
+    /// - Returns: whether a running program is still driving the belt within the new ceiling.
+    ///   `false` means the caller must enforce the ceiling itself — either there was no program, or
+    ///   there was one and it had to be stopped, and stopping commands no speed at all.
+    @discardableResult
+    public func applyCeiling(_ ceilingRaw: Int) -> Bool {
+        guard isRunning, let authored = authoredProgram, let current = activeProgram else {
+            return false
+        }
         // Re-clamp the AUTHORED program, not the running (already clamped) one, so raising the
         // ceiling widens the range back out instead of leaving it stuck where it was cut.
         guard let runnable = authored.clamped(toCeilingRaw: ceilingRaw) else {
             stop(reason: "speed ceiling leaves no room for the program")
-            return
+            return false
         }
-        guard runnable != current else { return }
+        guard runnable != current else { return true }
         onNote?(String(format: "Program range now %.1f–%.1f km/h (speed ceiling)",
                        runnable.minKph, runnable.maxKph))
         adopt(runnable)
+        return true
     }
 
     /// Move a running program to a new band without restarting it — the pace mode changed, or the

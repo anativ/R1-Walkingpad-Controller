@@ -1488,3 +1488,40 @@ func programsSavedByEarlierBuildsStillDecode() throws {
     )
     check(programs.count == 1)
 }
+
+/// `applyCeiling` must tell the caller whether a program is still driving the belt.
+///
+/// This is the hole the previous check left: it asserted the program stopped, but never that
+/// anything then slowed the belt. Stopping a program commands no speed, so if the caller skips its
+/// own enforcement (as `AppModel` used to when a program was running) the belt keeps its old pace
+/// while the UI shows the new, lower ceiling — invariant 6 failing exactly when it matters.
+func applyCeilingReportsWhoDrivesTheBelt() throws {
+    let t0 = Date(timeIntervalSince1970: 11_000_000)
+
+    // Case 1: no program running — the caller is always responsible.
+    let idle = ProgramRunner()
+    check(idle.applyCeiling(60) == false, "with no program, the caller must enforce the ceiling")
+
+    // Case 2: the band still fits, so the program keeps driving.
+    let fits = ProgramRunner()
+    var applied: [Double] = []
+    fits.onSpeed = { applied.append($0) }
+    var program = SpeedProgram.standard          // 4.0-5.5
+    program.maxRaw = 55
+    check(fits.start(program, ceilingRaw: 100, now: t0))
+    check(fits.applyCeiling(50) == true, "a program that fits the new ceiling still drives")
+    check(try require(fits.activeProgram).maxRaw == 50, "and it adopted the ceiling")
+
+    // Case 3: the ceiling leaves no room — the program stops, and it must say so, because it
+    // commands nothing on the way out.
+    let squeezed = ProgramRunner()
+    var squeezedSpeeds: [Double] = []
+    squeezed.onSpeed = { squeezedSpeeds.append($0) }
+    check(squeezed.start(program, ceilingRaw: 100, now: t0))
+    let commandsBefore = squeezedSpeeds.count
+    check(squeezed.applyCeiling(20) == false,
+          "a stopped program must report that the caller has to slow the belt")
+    check(!squeezed.isRunning, "and it must actually have stopped")
+    check(squeezedSpeeds.count == commandsBefore,
+          "stopping commands no speed — which is exactly why the caller must be told")
+}

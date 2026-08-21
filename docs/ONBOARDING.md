@@ -1065,7 +1065,13 @@ See §2. `ProtocolChecks.swift` for the function, `allChecks` in `main.swift` fo
 
 Written down rather than guessed at.
 
-- **Lowering the ceiling below a running program's band leaves the belt above the new ceiling.** In
+- ~~**Lowering the ceiling below a running program's band leaves the belt above the new ceiling.**~~
+  **Fixed.** `ProgramRunner.applyCeiling` now returns whether a program is still driving the belt,
+  and the `AppModel.settings` setter enforces the ceiling against the belt itself whenever it is
+  not — so stopping a program that no longer fits can no longer leave the belt at its old pace.
+  `applyCeilingReportsWhoDrivesTheBelt` pins the contract, including that stopping commands no
+  speed, which is the part the old check missed. Verified on a Mac: 71 checks, 1904 assertions.
+  The original analysis, kept because it was right: In
   the `AppModel.settings` setter the "slow the belt" branch is guarded by `if !runner.isRunning`, and
   `runner.applyCeiling` is called afterwards. If the new ceiling leaves no room, `applyCeiling` stops
   the program and never commands a speed — so nothing slows the belt, while `desiredSpeedKph` has
@@ -1083,24 +1089,23 @@ Written down rather than guessed at.
   `runner.stop(reason: "switching program")`. `runner.start` resets everything anyway, so the
   observable behaviour is a restart either way — but the event log loses the "Program stopped" line.
   Cosmetic, and possibly deliberate.
-- **`Metrics.pace`'s doc comment is stranded.** The line `/// Minutes per km. Returns nil when
-  stopped.` sits immediately above `restingKcalPerMinute`, two functions away from `pace`. Harmless,
-  but it reads as a wrong doc comment on the resting-metabolism function.
+- ~~**`Metrics.pace`'s doc comment is stranded.**~~ Fixed — moved onto `pace`.
 - **`handleBluetoothUnavailable` also handles `.resetting`/`.unknown`** via the `default` branch,
   which paints a "Bluetooth unavailable" state for what may be a transient startup value. I could not
   determine whether that is observable in practice without hardware.
-- **The 120 s calorie gap cap is duplicated**: `SessionTracker.maxCreditedGapSeconds` and a bare
-  `delta <= 120` literal in `SessionRecorder.ingest`. They agree today by coincidence of maintenance.
+- ~~**The 120 s calorie gap cap is duplicated**~~ Fixed — both now read
+  `Metrics.maxCreditedGapSeconds`.
 - **`lifetimeTotalsIncludingCurrent` folds in the open walk's distance, duration, steps and
   calories but not its peak speed.** Probably intentional (peak is a max over stored sessions), but I
   did not find it stated anywhere.
 - **No framing/reassembly for BLE notifications.** Each `didUpdateValueFor` is assumed to carry one
   complete frame. That has evidently held for this belt; I have no evidence about whether it can
   fragment.
-- **Assertion counts in commit messages drift.** The suite is currently 69 check functions
-  (`allChecks`) over 374 `check(...)` call sites; the runtime assertion count is higher because many
-  are inside loops. It was not run — no Swift toolchain was installed at the time of writing (see
-  §3) — so this quotes structure, not results.
+- ~~**Assertion counts in commit messages drift.**~~ Settled: the suite has since been **run on a
+  Mac** with the full toolchain. As of this edit it is **71 checks, 1904 assertions, all passing**,
+  and the tree compiles — including everything from the pace-algorithm session, which was written
+  without a toolchain and could not be compiled at the time. Quote measured numbers from
+  `./dist/padctl selftest`, not structure.
 
 ---
 

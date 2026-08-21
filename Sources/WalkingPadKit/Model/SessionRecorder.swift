@@ -76,7 +76,7 @@ public final class SessionRecorder {
         // Accumulate calories over the belt's own clock, so a pause pauses the burn.
         if baseline != nil, let previous = lastStatus {
             let delta = Double(status.elapsed - previous.elapsed)
-            if delta > 0, delta <= 120 {
+            if delta > 0, delta <= Metrics.maxCreditedGapSeconds {
                 kcal += Metrics.kcalPerMinute(speedKph: status.speedKph, profile: profile) * (delta / 60)
             }
         }

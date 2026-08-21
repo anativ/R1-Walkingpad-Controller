@@ -72,6 +72,7 @@ let allChecks: [(String, () throws -> Void)] = [
     ("presets suit the ceiling in force", presetsSuitTheCeilingInForce),
     ("raising ceiling restores program range", raisingCeilingRestoresProgramRange),
     ("programs saved by earlier builds still decode", programsSavedByEarlierBuildsStillDecode),
+    ("applyCeiling reports who drives the belt", applyCeilingReportsWhoDrivesTheBelt),
 ]
 
 func usage() -> Never {
