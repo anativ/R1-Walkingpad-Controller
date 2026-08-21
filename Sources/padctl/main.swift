@@ -71,6 +71,7 @@ let allChecks: [(String, () throws -> Void)] = [
     ("running mode unlocks the hardware maximum", runningModeUnlocksTheHardwareMaximum),
     ("presets suit the ceiling in force", presetsSuitTheCeilingInForce),
     ("raising ceiling restores program range", raisingCeilingRestoresProgramRange),
+    ("programs saved by earlier builds still decode", programsSavedByEarlierBuildsStillDecode),
 ]
 
 func usage() -> Never {

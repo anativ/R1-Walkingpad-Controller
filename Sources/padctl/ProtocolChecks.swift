@@ -1449,3 +1449,42 @@ func raisingCeilingRestoresProgramRange() throws {
     }
     check(applied.allSatisfy { $0 <= 6.0 }, "commanded above the ceiling: \(applied)")
 }
+
+/// A real payload written by an earlier build, captured from a live install. The block model was a
+/// substantial rewrite of `SpeedProgram`; if this stops decoding, everyone's saved programs are
+/// silently replaced by defaults on upgrade.
+func programsSavedByEarlierBuildsStillDecode() throws {
+    let legacy = """
+    {"stepRaw":1,"maxRaw":55,"minRaw":45,"kind":"upDown","name":"Meetings",\
+    "id":"6F049688-41B2-4EAE-BED2-2405EF2E6FE8","intervalSeconds":90}
+    """
+    let program = try require(
+        try? JSONDecoder().decode(SpeedProgram.self, from: Data(legacy.utf8))
+    )
+    check(program.name == "Meetings")
+    check(program.kind == .gentleDrift, "the old \"upDown\" kind must map to the drift")
+    check(program.minRaw == 45 && program.maxRaw == 55, "band must survive: \(program.minRaw)-\(program.maxRaw)")
+    check(program.stepRaw == 1)
+    check(program.intervalSeconds == 90)
+    check(program.isValid, "a program that used to run must still be runnable")
+    check(program.id == UUID(uuidString: "6F049688-41B2-4EAE-BED2-2405EF2E6FE8"),
+          "identity must survive, or Save overwrites the wrong entry")
+
+    // And it must still walk its original series: 4.5 -> 5.5 in 0.1 steps, endpoints once per lap.
+    var state = SpeedSequence.start(of: program)
+    var series = [state.raw]
+    for _ in 0..<24 {
+        state = SpeedSequence.next(state, in: program)
+        series.append(state.raw)
+    }
+    check(Array(series.prefix(11)) == Array(45...55), "climb diverged: \(Array(series.prefix(11)))")
+    check(series[11] == 54, "must turn around without repeating the top: \(series[11])")
+    check(series.allSatisfy { $0 >= 45 && $0 <= 55 }, "left its band: \(series)")
+
+    // A list of them decodes too, which is how savedPrograms is stored.
+    let list = "[\(legacy)]"
+    let programs = try require(
+        try? JSONDecoder().decode([SpeedProgram].self, from: Data(list.utf8))
+    )
+    check(programs.count == 1)
+}
