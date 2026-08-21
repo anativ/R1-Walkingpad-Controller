@@ -24,6 +24,29 @@ public enum SpeedLimits {
         return min(max(minRunningKph, requested), hardMaxKph)
     }
 
+    /// Whether the app must itself command a lower speed after the ceiling changed.
+    ///
+    /// - Parameters:
+    ///   - programStillDriving: a running program adopted the new ceiling and is driving the belt,
+    ///     so it will command its own speeds; anything else means nobody else will.
+    ///   - beltIsMovingOrAboutTo: includes a start still working through the command queue.
+    ///   - commandedSpeedKph: the highest speed the belt is either running at **or** has already
+    ///     been told to run at. Using only the belt's reported speed misses a faster command still
+    ///     in flight — status frames arrive about once a second — and the ceiling would then be
+    ///     enforced against a speed that is about to be superseded.
+    public static func needsCorrectiveWrite(
+        programStillDriving: Bool,
+        isConnected: Bool,
+        beltIsMovingOrAboutTo: Bool,
+        commandedSpeedKph: Double,
+        ceilingKph: Double
+    ) -> Bool {
+        guard !programStillDriving, isConnected, beltIsMovingOrAboutTo else { return false }
+        guard commandedSpeedKph.isFinite else { return false }
+        // Only ever to slow down: this must never raise a belt that is coasting below the ceiling.
+        return commandedSpeedKph > ceilingKph
+    }
+
     /// Speed presets to offer for a given ceiling. Running mode needs a different ladder: the
     /// walking steps are useless above 6, and ten buttons in a row is not a choice.
     public static func presets(forCeiling ceiling: Double) -> [Double] {

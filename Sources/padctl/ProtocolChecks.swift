@@ -1512,6 +1512,15 @@ func applyCeilingReportsWhoDrivesTheBelt() throws {
     check(fits.applyCeiling(50) == true, "a program that fits the new ceiling still drives")
     check(try require(fits.activeProgram).maxRaw == 50, "and it adopted the ceiling")
 
+    // Case 2b: the band already fits, so nothing changes — the early-out must still report that
+    // the program is driving. An unchanged band is by definition already within the ceiling.
+    let unchanged = ProgramRunner()
+    check(unchanged.start(program, ceilingRaw: 55, now: t0))
+    let bandBefore = try require(unchanged.activeProgram)
+    check(unchanged.applyCeiling(100) == true, "an unchanged band still means the program drives")
+    check(try require(unchanged.activeProgram).maxRaw == bandBefore.maxRaw,
+          "a raised ceiling cannot push the band above what was authored")
+
     // Case 3: the ceiling leaves no room — the program stops, and it must say so, because it
     // commands nothing on the way out.
     let squeezed = ProgramRunner()
@@ -1524,4 +1533,46 @@ func applyCeilingReportsWhoDrivesTheBelt() throws {
     check(!squeezed.isRunning, "and it must actually have stopped")
     check(squeezedSpeeds.count == commandsBefore,
           "stopping commands no speed — which is exactly why the caller must be told")
+}
+
+/// The ceiling must reach the belt in every case where nothing else will — including when a faster
+/// speed has been commanded but not yet confirmed by a status frame.
+func ceilingCorrectionCoversTheInFlightRace() throws {
+    // The original bug: a program stopped by a too-low ceiling commands nothing, so the app must.
+    check(SpeedLimits.needsCorrectiveWrite(
+        programStillDriving: false, isConnected: true, beltIsMovingOrAboutTo: true,
+        commandedSpeedKph: 8.0, ceilingKph: 6.0), "a belt above the ceiling must be slowed")
+
+    // The race: a 9 km/h command is in flight, the belt still reports 3, and Run mode is turned
+    // off. Judging by the belt's reported speed alone would miss it and leave the belt at 9.
+    check(SpeedLimits.needsCorrectiveWrite(
+        programStillDriving: false, isConnected: true, beltIsMovingOrAboutTo: true,
+        commandedSpeedKph: 9.0, ceilingKph: 6.0),
+        "an unconfirmed faster command must still be caught")
+
+    // A running program that adopted the new ceiling drives its own speeds; do not fight it.
+    check(!SpeedLimits.needsCorrectiveWrite(
+        programStillDriving: true, isConnected: true, beltIsMovingOrAboutTo: true,
+        commandedSpeedKph: 8.0, ceilingKph: 6.0), "must not fight a program that is in charge")
+
+    // Never raise a belt that is already below the ceiling — this only ever slows.
+    check(!SpeedLimits.needsCorrectiveWrite(
+        programStillDriving: false, isConnected: true, beltIsMovingOrAboutTo: true,
+        commandedSpeedKph: 3.0, ceilingKph: 6.0), "must never speed a belt up")
+    check(!SpeedLimits.needsCorrectiveWrite(
+        programStillDriving: false, isConnected: true, beltIsMovingOrAboutTo: true,
+        commandedSpeedKph: 6.0, ceilingKph: 6.0), "exactly at the ceiling needs no correction")
+
+    // Nothing to correct when the belt is still, or unreachable.
+    check(!SpeedLimits.needsCorrectiveWrite(
+        programStillDriving: false, isConnected: true, beltIsMovingOrAboutTo: false,
+        commandedSpeedKph: 8.0, ceilingKph: 6.0), "a still belt needs no correction")
+    check(!SpeedLimits.needsCorrectiveWrite(
+        programStillDriving: false, isConnected: false, beltIsMovingOrAboutTo: true,
+        commandedSpeedKph: 8.0, ceilingKph: 6.0), "cannot command a belt we are not connected to")
+
+    // Garbage must not trigger a write.
+    check(!SpeedLimits.needsCorrectiveWrite(
+        programStillDriving: false, isConnected: true, beltIsMovingOrAboutTo: true,
+        commandedSpeedKph: .nan, ceilingKph: 6.0))
 }

@@ -152,7 +152,13 @@ final class AppModel: ObservableObject {
             // fits, and stopping commands no speed, so the belt would have kept its old pace while
             // the UI showed the new limit. Sent through the controller directly, so that lowering
             // the ceiling is not mistaken for the manual override that ends a program.
-            if !programStillDriving, isConnected, isMoving, beltSpeedKph > ceiling {
+            if SpeedLimits.needsCorrectiveWrite(
+                programStillDriving: programStillDriving,
+                isConnected: isConnected,
+                beltIsMovingOrAboutTo: beltIsMovingOrAboutTo,
+                commandedSpeedKph: commandedSpeedKph,
+                ceilingKph: ceiling
+            ) {
                 controller.appendLog(
                     String(format: "Ceiling lowered to %.1f km/h — slowing the belt", ceiling), .warning
                 )
@@ -453,6 +459,15 @@ final class AppModel: ObservableObject {
         if isMoving { return true }
         if let pending = controller.inFlightSpeedRaw, pending > 0 { return true }
         return false
+    }
+
+    /// The highest speed the belt is running at or has already been told to run at.
+    ///
+    /// A speed committed a moment ago is not in a status frame yet, so the belt's reported speed
+    /// alone would let a faster in-flight command slip under a ceiling change.
+    var commandedSpeedKph: Double {
+        let inFlight = controller.inFlightSpeedRaw.map { Double($0) / 10 } ?? 0
+        return max(beltSpeedKph, inFlight)
     }
 
     /// Speed to quote in the prompt: the belt's own, or the one it is still being told to run at.
