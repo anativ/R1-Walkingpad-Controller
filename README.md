@@ -7,6 +7,10 @@ vendor account, no phone required.
 ![built with SwiftUI + CoreBluetooth](https://img.shields.io/badge/SwiftUI-CoreBluetooth-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+<p align="center">
+  <img src="docs/screenshots/dashboard.png" alt="Dashboard: speed, Walk/Run, and pace algorithms" width="520">
+</p>
+
 ## What it shows
 
 Everything the belt reports, plus what can be derived from it:
@@ -160,6 +164,10 @@ The dose figures describe *scheduled* intensity, not measured effort — the bel
 rate. Everything here is general information about published research, not medical advice.
 
 ## Custom programs
+
+<p align="center">
+  <img src="docs/screenshots/session.png" alt="Custom program after a two-hour interval walk, with session metrics and speed chart" width="520">
+</p>
 
 The **Custom program** card is for building something the boxes do not cover. Pick a shape, set the
 band, and for **Gentle drift** also the step and interval:
