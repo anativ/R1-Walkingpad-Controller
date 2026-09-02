@@ -5,6 +5,7 @@ A1/C1/P1 family — they all speak the same Bluetooth protocol) over BLE. No dep
 vendor account, no phone required.
 
 ![built with SwiftUI + CoreBluetooth](https://img.shields.io/badge/SwiftUI-CoreBluetooth-blue)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## What it shows
 
@@ -378,3 +379,8 @@ speed you are not ready to walk at, and keep the belt's own remote within reach.
 The BLE protocol was reverse engineered by
 [ph4r05/ph4-walkingpad](https://github.com/ph4r05/ph4-walkingpad); this app is an independent
 native Swift implementation of it. Not affiliated with KingSmith.
+
+## License
+
+MIT. Free to use, copy, modify, and distribute. This software drives a motorised treadmill —
+use it at your own risk, with no warranty of any kind. See [LICENSE](LICENSE).
