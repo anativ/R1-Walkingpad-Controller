@@ -20,6 +20,11 @@ this repository only, and it was set by the repo owner. Just commit and push.
 
 `build.sh` runs `padctl selftest` before every build; if it fails, the build stops.
 
+CI (`.github/workflows/release.yml`) builds a universal `WalkingPad.app` on every push to
+`main` and publishes `WalkingPad.zip` as the GitHub Release `latest`. Ad-hoc signed —
+Gatekeeper needs right-click Open. There is no Apple Developer ID / notarization; see
+[ADR 0003](docs/adr/0003-ci-adhoc-release.md).
+
 ## Environment constraints (they shape the design — do not "fix" them)
 
 - This machine has the Xcode **Command Line Tools only**, no full Xcode. The CLT SDK ships AppKit,

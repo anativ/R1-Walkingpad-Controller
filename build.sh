@@ -4,7 +4,9 @@
 #   ./build.sh              build dist/WalkingPad.app
 #   ./build.sh --run        build, then launch it
 #   ./build.sh --install    build, then copy to /Applications
+#   ./build.sh --zip        build, then zip to dist/WalkingPad.zip
 #   UNIVERSAL=1 ./build.sh  build a universal (arm64 + x86_64) binary
+#   VERSION=1.2 BUILD=47    stamp CFBundleShortVersionString / CFBundleVersion
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -37,6 +39,13 @@ cp "$BIN_PATH/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
 cp Support/Info.plist "$APP/Contents/Info.plist"
 cp build/icon/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
+
+if [[ -n "${VERSION:-}" ]]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
+fi
+if [[ -n "${BUILD:-}" ]]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$APP/Contents/Info.plist"
+fi
 
 # CoreBluetooth requires a signed bundle. Ad-hoc signing is enough for local use;
 # note that the signature changes on every rebuild, so macOS may re-ask for the
@@ -89,6 +98,12 @@ if [[ "${1:-}" == "--install" ]]; then
   rm -rf "/Applications/$APP_NAME.app"
   cp -R "$APP" "/Applications/$APP_NAME.app"
   echo "    installed /Applications/$APP_NAME.app"
+fi
+
+if [[ "${1:-}" == "--zip" ]]; then
+  echo "==> Zipping"
+  /usr/bin/ditto -c -k --keepParent "$APP" "$DIST/$APP_NAME.zip"
+  echo "    $DIST/$APP_NAME.zip"
 fi
 
 if [[ "${1:-}" == "--run" ]]; then

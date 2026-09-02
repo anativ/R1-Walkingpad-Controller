@@ -1,0 +1,96 @@
+# Builds a universal WalkingPad.app and publishes it as a GitHub Release so people
+# can download instead of compiling. Ad-hoc signed: see ADR 0003.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        env:
+          UNIVERSAL: "1"
+          BUILD: ${{ github.run_number }}
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+          else
+            export VERSION="1.0"
+          fi
+          ./build.sh --zip
+          shasum -a 256 dist/WalkingPad.zip | tee dist/WalkingPad.zip.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WalkingPad
+          path: |
+            dist/WalkingPad.zip
+            dist/WalkingPad.zip.sha256
+          if-no-files-found: error
+
+      - name: Publish latest
+        if: github.ref == 'refs/heads/main'
+        uses: ncipollo/release-action@v1
+        with:
+          tag: latest
+          name: Latest
+          artifacts: dist/WalkingPad.zip,dist/WalkingPad.zip.sha256
+          allowUpdates: true
+          replacesArtifacts: true
+          makeLatest: true
+          body: |
+            Universal macOS 14+ build of `WalkingPad.app` from ${{ github.sha }}.
+
+            ## Install
+
+            1. Download `WalkingPad.zip` below and unzip it
+            2. Right-click **WalkingPad.app** → **Open** → Open
+               (Gatekeeper warns because this build is ad-hoc signed, not notarized)
+            3. Allow Bluetooth when macOS asks
+
+            Or from Terminal:
+
+            ```bash
+            xattr -cr WalkingPad.app && open WalkingPad.app
+            ```
+
+            Each CI build has a new ad-hoc signature, so an update may re-prompt for Bluetooth.
+
+      - name: Publish versioned release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: dist/WalkingPad.zip,dist/WalkingPad.zip.sha256
+          name: ${{ github.ref_name }}
+          makeLatest: true
+          body: |
+            Universal macOS 14+ build of `WalkingPad.app` (${{ github.ref_name }}).
+
+            ## Install
+
+            1. Download `WalkingPad.zip` below and unzip it
+            2. Right-click **WalkingPad.app** → **Open** → Open
+               (Gatekeeper warns because this build is ad-hoc signed, not notarized)
+            3. Allow Bluetooth when macOS asks
+
+            Or from Terminal:
+
+            ```bash
+            xattr -cr WalkingPad.app && open WalkingPad.app
+            ```

@@ -6,10 +6,27 @@ vendor account, no phone required.
 
 ![built with SwiftUI + CoreBluetooth](https://img.shields.io/badge/SwiftUI-CoreBluetooth-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Download](https://img.shields.io/github/v/release/anativ/R1-Walkingpad-Controller?label=download)](https://github.com/anativ/R1-Walkingpad-Controller/releases/latest)
 
 <p align="center">
   <img src="docs/screenshots/dashboard.png" alt="Dashboard: speed, Walk/Run, and pace algorithms" width="520">
 </p>
+
+## Download
+
+[**WalkingPad.zip**](https://github.com/anativ/R1-Walkingpad-Controller/releases/latest/download/WalkingPad.zip)
+— universal macOS 14+ app (Apple Silicon and Intel), rebuilt by CI on every push to `main`.
+
+The build is ad-hoc signed (no Apple Developer ID), so Gatekeeper blocks a double-click from
+the internet.
+
+1. Unzip the download
+2. Right-click **WalkingPad.app** → **Open** → Open
+3. Allow Bluetooth when macOS asks
+
+Or from Terminal: `xattr -cr WalkingPad.app && open WalkingPad.app`
+
+To compile it yourself instead, see [Build and run](#build-and-run).
 
 ## What it shows
 
@@ -293,7 +310,8 @@ These are estimates from a published formula, not measurements. Treat them as in
 
 ## Build and run
 
-Requires only the Xcode Command Line Tools (`xcode-select --install`). Full Xcode is optional.
+Prefer the [Download](#download) if you just want to run it. Building from source requires
+the Xcode Command Line Tools (`xcode-select --install`). Full Xcode is optional.
 
 ```bash
 ./build.sh --run
@@ -305,6 +323,7 @@ That verifies the protocol layer, compiles, generates the icon, assembles and ad
 ```bash
 ./build.sh              # just build
 ./build.sh --install    # build and copy to /Applications
+./build.sh --zip        # build and zip to dist/WalkingPad.zip
 UNIVERSAL=1 ./build.sh  # universal arm64 + x86_64 binary
 ```
 
@@ -370,6 +389,7 @@ Sources/padctl/          CLI diagnostics + protocol self-test
 Support/                 Info.plist for the app and the CLI
 tools/MakeIcon.swift     draws AppIcon.icns
 docs/adr/                architecture decision records
+.github/workflows/       CI: universal app zip, published as the GitHub Release `latest`
 ```
 
 There is no test target: this toolchain's SDK ships neither XCTest nor swift-testing, so the
