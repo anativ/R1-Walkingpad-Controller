@@ -91,6 +91,9 @@ struct WalkingPadApp: App {
                 Button(app.isConnected ? "Disconnect" : "Connect") { app.toggleConnection() }
                     .keyboardShortcut("k", modifiers: [.command])
                 Button("Reset session metrics") { app.resetSessionMetrics() }
+                Divider()
+                Button("Save Diagnostics Report…") { app.saveDiagnosticsReport() }
+                    .disabled(app.isSavingDiagnostics)
             }
         }
 
@@ -222,6 +225,8 @@ private struct MenuBarContent: View {
         // Reachable from here too: with the window closed or the Dock icon hidden, the app menu's
         // Settings item is not available, and this was the only route left.
         SettingsLink { Text("Settings…") }
+        Button("Save Diagnostics Report…") { app.saveDiagnosticsReport() }
+            .disabled(app.isSavingDiagnostics)
         Button("Quit WalkingPad") { NSApp.terminate(nil) }
     }
 }

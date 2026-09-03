@@ -680,7 +680,8 @@ public final class PadController: NSObject, ObservableObject {
             if verboseLogging { logger.notice("\(text, privacy: .public)") } else { logger.debug("\(text, privacy: .public)") }
         }
         log.append(PadLogEntry(text: text, kind: kind, at: Date()))
-        if log.count > 400 { log.removeFirst(log.count - 400) }
+        // Roomy enough for a whole troubleshooting session to fit in one report.
+        if log.count > 3000 { log.removeFirst(log.count - 3000) }
     }
 
     public func clearLog() { log.removeAll() }

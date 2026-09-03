@@ -306,6 +306,20 @@ final class AppModel: ObservableObject {
     /// Whether the Bluetooth log is verbose right now.
     var isBeltLogVerbose: Bool { settings.isBeltLogVerbose }
 
+    /// True while a diagnostics report is being assembled (the system-log read takes a moment).
+    @Published var isSavingDiagnostics = false
+
+    /// Write everything the app knows to a file on the Desktop and show it in Finder.
+    func saveDiagnosticsReport() {
+        guard !isSavingDiagnostics else { return }
+        isSavingDiagnostics = true
+        controller.appendLog("Diagnostics report requested", .info)
+        DiagnosticsReport.saveAndReveal(app: self) { [weak self] result in
+            self?.isSavingDiagnostics = false
+            DiagnosticsReport.announce(result)
+        }
+    }
+
     /// Remember a verbosity choice. It sticks across launches and family changes.
     func setBeltLogVerbose(_ verbose: Bool) {
         guard settings.isBeltLogVerbose != verbose || settings.verboseBeltLog == nil else { return }

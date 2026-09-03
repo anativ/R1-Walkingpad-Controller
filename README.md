@@ -355,6 +355,16 @@ Turn the belt on and put it in standby (not off) before connecting. The app scan
 service of the belt model chosen in Settings, and falls back to matching on device name after a
 few seconds.
 
+## Sending a diagnostics report
+
+If the belt will not connect, or connects and does nothing, press **Save diagnostics…** — it
+appears next to the Connect button whenever that happens, and is always in the **Belt** menu, in
+the menu-bar item, and at the bottom of Diagnostics. It writes one text file to your Desktop and
+selects it in Finder. Send that file. It contains the app and macOS versions, the belt model
+setting, the connection state, every Bluetooth characteristic the belt exposed, the full event
+log since launch, and the app's system log for the last two hours, so earlier attempts are in
+it too. Nothing personal is in it beyond the belt's Bluetooth name.
+
 ## Troubleshooting with padctl
 
 `dist/padctl` is a CLI for when the GUI cannot find the belt:

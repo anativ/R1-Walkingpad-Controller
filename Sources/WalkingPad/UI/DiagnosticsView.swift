@@ -52,6 +52,20 @@ struct DiagnosticsView: View {
                 // "connects but does nothing" gets diagnosed from another Mac.
                 Button("Copy") { copyLog() }.controlSize(.small)
                 Button("Clear") { app.controller.clearLog() }.controlSize(.small)
+                // And for people who would rather not paste anything: one file on the Desktop.
+                Button {
+                    app.saveDiagnosticsReport()
+                } label: {
+                    if app.isSavingDiagnostics {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("Save report…")
+                    }
+                }
+                .controlSize(.small)
+                .disabled(app.isSavingDiagnostics)
+                .help("Write a diagnostics report to your Desktop and show it in Finder — the event "
+                      + "log, the belt's details and the app's system log — ready to send.")
             }
 
             ScrollViewReader { proxy in

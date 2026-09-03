@@ -80,11 +80,25 @@ struct ConnectionBar: View {
             if app.controller.state.isBusy {
                 ProgressView().controlSize(.small)
             }
+            if showsDiagnosticsShortcut {
+                // The moment something is wrong is the moment the report is wanted, and the
+                // Diagnostics panel is at the bottom of a long page.
+                Button("Save diagnostics…") { app.saveDiagnosticsReport() }
+                    .controlSize(.small)
+                    .disabled(app.isSavingDiagnostics)
+                    .help("Write a report to your Desktop with everything needed to see why the belt is not responding.")
+            }
             Button(buttonTitle) { app.toggleConnection() }
                 .controlSize(.small)
         }
         .padding(12)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    /// No belt found, or a belt that connected and then never said anything.
+    private var showsDiagnosticsShortcut: Bool {
+        if case .notFound = app.controller.state { return true }
+        return app.isConnected && app.status == nil
     }
 
     private var buttonTitle: String {
