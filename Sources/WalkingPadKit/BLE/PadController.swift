@@ -87,6 +87,9 @@ public final class PadController: NSObject, ObservableObject {
     /// Once the belt reports movement, how long to let the motor settle before the speed target
     /// is written. The firmware drops the link if the two overlap; two seconds is comfortably clear.
     public static let startSettleDelay: TimeInterval = 2.0
+    /// A belt that pushes status (FTMS) is expected to say something at least this often. Past it
+    /// the link is treated as dead: otherwise a stalled stream would show a belt "running" forever.
+    public static let staleStatusBudget: TimeInterval = 10.0
 
     @Published public private(set) var state: PadConnectionState = .idle {
         didSet {
@@ -159,6 +162,8 @@ public final class PadController: NSObject, ObservableObject {
     private var connectDeadlineTimer: Timer?
     private var speedConfirmTimer: Timer?
     private var heldSpeedTimer: Timer?
+    private var staleStatusTimer: Timer?
+    private var readyAt: Date?
     private var setupWorkItem: DispatchWorkItem?
     private var wantsConnection = false
     private var isBroadScanning = false
@@ -562,10 +567,29 @@ public final class PadController: NSObject, ObservableObject {
             ) { [weak self] _ in
                 self?.send(.askStats)
             }
+        } else {
+            // Nothing is asked for, so nothing would notice the stream stopping. Watch it.
+            readyAt = Date()
+            staleStatusTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+                self?.checkStatusStream()
+            }
         }
         rssiTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             self?.peripheral?.readRSSI()
         }
+    }
+
+    /// The pushed status stream went quiet: drop the link so the reconnect logic takes over,
+    /// rather than leaving the last frame on screen as if it were live.
+    private func checkStatusStream() {
+        guard let peripheral, isReady else { return }
+        let last = status?.receivedAt ?? readyAt ?? Date()
+        let silence = Date().timeIntervalSince(last)
+        guard silence > PadController.staleStatusBudget else { return }
+        appendLog("No status from the belt for \(Int(silence))s — reconnecting", .warning)
+        staleStatusTimer?.invalidate()
+        staleStatusTimer = nil
+        central.cancelPeripheralConnection(peripheral)
     }
 
     private func stopTimers() {
@@ -573,7 +597,8 @@ public final class PadController: NSObject, ObservableObject {
         rssiTimer?.invalidate(); rssiTimer = nil
         connectDeadlineTimer?.invalidate(); connectDeadlineTimer = nil
         speedConfirmTimer?.invalidate(); speedConfirmTimer = nil
-        dropHeldSpeed()
+        staleStatusTimer?.invalidate(); staleStatusTimer = nil
+        // A held speed is connection state, not a timer: `resetConnectionArtifacts` drops it.
     }
 
     // MARK: - Logging

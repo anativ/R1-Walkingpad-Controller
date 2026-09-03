@@ -147,7 +147,8 @@ final class AppModel: ObservableObject {
             }
             // A Slider whose value sits outside its own range misbehaves, so follow the ceiling down.
             let ceiling = SpeedLimits.effectiveCeiling(
-                walkingCeilingKph: newValue.speedCeilingKph, isRunningMode: newValue.isRunningMode
+                walkingCeilingKph: newValue.speedCeilingKph, isRunningMode: newValue.isRunningMode,
+                beltMaxKph: controller.beltSpeedRange?.maxKph
             )
             if desiredSpeedKph > ceiling { desiredSpeedKph = ceiling }
             // The controller applies the ceiling again at the wire, so a speed already queued or

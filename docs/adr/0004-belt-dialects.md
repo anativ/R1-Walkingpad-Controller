@@ -40,7 +40,10 @@ services at once and picked the protocol from whatever answered, with no user-fa
    `startSettleDelay` (2 s) after, cancelled by a stop or a newer speed, and bounded by a 15 s
    deadline; a refused request-control is logged, not treated as failure.
 5. **The belt's reported speed range is a hard limit on top of the app's ceiling**, never a
-   loosening of it. Non-zero requests below the belt's minimum are lifted to it; zero stays a stop.
+   loosening of it, and it is applied once more at the wire so a speed that waited in the queue
+   or for the motor goes out under the limit in force at the moment of the write. A request
+   below the belt's minimum is treated as a stop — never lifted, because the app must not
+   command a faster speed than was asked for.
 6. **`PadCommand` stays the app-facing vocabulary.** A dialect that lacks a command returns no
    write for it, and the controller drops it before it reaches the queue, so `mode → start →
    speed` becomes `start → speed` on FTMS without touching the callers or the queue's ordering
@@ -70,7 +73,16 @@ services at once and picked the protocol from whatever answered, with no user-fa
 
 - The FTMS path was built from the specification and published reverse engineering, not from a
   Z1F in hand. `./dist/padctl --z1 watch` is the first thing to run against real hardware; the
-  event log shows every frame, response and held speed.
+  event log shows every frame, response and held speed. Two things to confirm there: that the
+  belt sets the elapsed-time flag in Treadmill Data (the recorder and calorie estimate run on
+  the belt's clock, and would sit at zero without it), and how the belt behaves on start.
+- **On FTMS the belt necessarily starts before it hears the speed.** Start comes first, then the
+  hold for movement, then the settle, then the target. During that window the belt runs at its
+  own remembered start speed, which the app cannot see or cap. That is inherent to the protocol;
+  the settle delay lengthens the window by two seconds. The app's own ceiling is enforced at the
+  wire the moment the target does go out.
+- A belt that pushes status is watched: ten seconds of silence on a connected link drops it and
+  the reconnect logic takes over, so a stalled stream never shows as a running belt.
 - Existing users see one new setting, defaulted to what they had.
 - Belt-side preferences, modes and the stored-session card do not exist for the Z1 family. The
   Z1's own vendor "supplement" service could carry some of them and is a candidate for later.

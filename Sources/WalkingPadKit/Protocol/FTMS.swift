@@ -212,7 +212,6 @@ public enum FTMS {
         private var steps = 0
         /// Last target speed the belt acknowledged, in 0.01 km/h.
         private var targetHundredths: UInt16 = 0
-        private var pendingParts: [TreadmillData] = []
 
         public init() {}
 
@@ -225,11 +224,9 @@ public enum FTMS {
         public mutating func ingest(_ bytes: [UInt8], now: Date = Date()) -> PadStatus? {
             guard let part = TreadmillData(bytes: bytes) else { return nil }
             merge(part)
-            if part.moreData {
-                pendingParts.append(part)
-                return nil
-            }
-            pendingParts.removeAll()
+            // A continuation packet's fields are folded in above; the packet that carries the
+            // speed completes the update and is the one that becomes a status.
+            if part.moreData { return nil }
             let speedHundredths = part.speedHundredths ?? 0
             let speedRaw = FTMS.tenths(fromHundredths: speedHundredths)
             return PadStatus(
