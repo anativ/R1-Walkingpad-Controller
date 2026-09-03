@@ -1616,13 +1616,28 @@ func ftmsTreadmillDataBecomesAStatus() throws {
 func ftmsMoreDataPacketsAreMergedIntoOneStatus() throws {
     var assembler = FTMS.StatusAssembler()
     let part = FTMS.TreadmillData.encode(moreData: true, totalDistanceMetres: 2500, elapsedSeconds: 1800)
-    check(assembler.ingest(part) == nil, "a continuation packet must not produce a status")
+    // A continuation packet still refreshes the counters it carries.
+    let partial = try require(assembler.ingest(part))
+    check(partial.distanceRaw == 250 && partial.elapsed == 1800)
+    check(partial.speedRaw == 0, "no speed seen yet")
     let final = FTMS.TreadmillData.encode(speedHundredths: 500, steps: 3000)
     let status = try require(assembler.ingest(final))
     check(status.speedRaw == 50)
     check(status.distanceRaw == 250)
     check(status.elapsed == 1800)
     check(status.steps == 3000)
+
+    // Firmware that sets "More Data" on every packet yet still sends the speed field: the packet
+    // is long enough to hold one, so it is read. The vendor app's parser does the same.
+    var flagged = FTMS.TreadmillData.encode(speedHundredths: 350, totalDistanceMetres: 1234, elapsedSeconds: 554, steps: 977)
+    flagged[0] |= 0x01
+    let stubborn = try require(FTMS.TreadmillData(bytes: flagged))
+    check(stubborn.moreData && stubborn.speedHundredths == 350, "speed read despite the flag")
+    check(stubborn.totalDistanceMetres == 1234 && stubborn.elapsedSeconds == 554 && stubborn.steps == 977,
+          "fields still line up after the speed")
+    var fresh = FTMS.StatusAssembler()
+    let status2 = try require(fresh.ingest(flagged))
+    check(status2.speedRaw == 35 && status2.steps == 977)
 
     // Garbage in, nothing out — never a crash on a short packet.
     check(FTMS.TreadmillData(bytes: [0x04]) == nil)
@@ -1754,9 +1769,12 @@ func ftmsSetupIsStaggeredAndEndsWithRequestControl() throws {
             lastPause = pause
         }
     }
-    check(subscribed == [FTMSDialect.treadmillDataUUID, FTMSDialect.machineStatusUUID,
-                         FTMSDialect.controlPointUUID, FTMSDialect.supplementNotifyUUID])
+    check(subscribed == [FTMSDialect.machineStatusUUID, FTMSDialect.trainingStatusUUID,
+                         FTMSDialect.controlPointUUID, FTMSDialect.treadmillDataUUID,
+                         FTMSDialect.supplementNotifyUUID], "the vendor app's subscription order")
     check(steps.contains(.read(FTMSDialect.speedRangeUUID)))
+    check(steps.contains(.read(FTMSDialect.featureUUID)))
+    check(steps.contains(.read(FTMSDialect.softwareRevisionUUID)), "firmware version goes in the log")
     check(steps.last == .write(BeltWrite(characteristic: FTMSDialect.controlPointUUID, bytes: [0x00])),
           "control is requested once everything is subscribed")
     check(FTMSDialect().requiredCharacteristicUUIDs.contains(FTMSDialect.controlPointUUID))
@@ -1862,4 +1880,19 @@ func ftmsHandshakesOnTheSupplementServiceBeforeControl() throws {
     // Whatever the belt answers is surfaced verbatim.
     let reply = z1.decode(characteristic: FTMSDialect.supplementNotifyUUID, bytes: [0x01, 0x02, 0xAB], now: Date())
     check(reply.contains { if case .note(let text, _) = $0 { return text.contains("01 02 ab") }; return false })
+
+    // Both known spellings of the property-list request go out during bring-up.
+    check(steps.contains(.write(BeltWrite(characteristic: FTMSDialect.supplementWriteUUID,
+                                          bytes: FTMS.Supplement.propertyListBareBytes))))
+
+    // A frame the parser cannot read is logged (a few times), never dropped in silence.
+    let bad = z1.decode(characteristic: FTMSDialect.treadmillDataUUID, bytes: [0x04], now: Date())
+    check(bad.contains { if case .note(let text, let warn) = $0 { return warn && text.contains("Unreadable") }; return false })
+    // Firmware, features and training status are decoded for the log.
+    check(z1.decode(characteristic: FTMSDialect.softwareRevisionUUID, bytes: Array("V0.0.6".utf8), now: Date())
+            .contains { if case .note(let t, _) = $0 { return t.contains("V0.0.6") }; return false })
+    check(z1.decode(characteristic: FTMSDialect.trainingStatusUUID, bytes: [0x00, 0x01], now: Date())
+            .contains { if case .note(let t, _) = $0 { return t.contains("idle") }; return false })
+    check(z1.decode(characteristic: FTMSDialect.featureUUID, bytes: [0x44, 0x12, 0, 0, 1, 0, 0, 0], now: Date())
+            .contains { if case .note(let t, _) = $0 { return t.contains("0x00001244") }; return false })
 }

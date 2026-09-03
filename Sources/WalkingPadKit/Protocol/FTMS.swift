@@ -18,6 +18,26 @@ public enum FTMS {
     public static let controlPointUUID16: UInt16 = 0x2AD9
     /// Notify: started / stopped / target changed events.
     public static let machineStatusUUID16: UInt16 = 0x2ADA
+    /// Read: feature bit masks (two uint32).
+    public static let featureUUID16: UInt16 = 0x2ACC
+    /// Notify: training status (flags byte, status byte).
+    public static let trainingStatusUUID16: UInt16 = 0x2AD3
+    /// Device Information service and its software-revision string.
+    public static let deviceInformationServiceUUID16: UInt16 = 0x180A
+    public static let softwareRevisionUUID16: UInt16 = 0x2A28
+
+    /// Standard FTMS training-status codes, for the log.
+    public static func trainingStatusLabel(_ code: UInt8) -> String {
+        switch code {
+        case 0x00: return "other"
+        case 0x01: return "idle"
+        case 0x02: return "warming up"
+        case 0x0C: return "manual mode"
+        case 0x0D: return "pre-workout"
+        case 0x0E: return "post-workout"
+        default: return String(format: "code 0x%02x", code)
+        }
+    }
 
     // MARK: KingSmith supplement service (KS-HD-* belts)
 
@@ -31,6 +51,10 @@ public enum FTMS {
         /// "Request all properties", as captured on the wire from the vendor app. The same frame
         /// builder serves the MC-21's ODM channel and the KS-HD supplement channel.
         public static let propertyListBytes: [UInt8] = [0x01, 0x00, 0x0D, 0x00, 0x06, 0x0B, 0x0F, 0x0D]
+        /// The same request as the decompiled builder literally produces it: body `20 00 00 00`
+        /// plus a one-byte checksum. Which of the two the KS-HD firmware wants is unknown, so
+        /// bring-up sends both and logs whatever comes back.
+        public static let propertyListBareBytes: [UInt8] = [0x20, 0x00, 0x00, 0x00, 0x20]
     }
 
     // MARK: Control Point opcodes
@@ -149,6 +173,25 @@ public enum FTMS {
             public static let kingSmithSteps = Flags(rawValue: 1 << 13)
         }
 
+        /// Bytes the optional fields announced by `flags` occupy, in spec order.
+        static func optionalFieldsSize(_ flags: Flags) -> Int {
+            var size = 0
+            if flags.contains(.averageSpeed) { size += 2 }
+            if flags.contains(.totalDistance) { size += 3 }
+            if flags.contains(.inclination) { size += 4 }
+            if flags.contains(.elevationGain) { size += 4 }
+            if flags.contains(.instantaneousPace) { size += 1 }
+            if flags.contains(.averagePace) { size += 1 }
+            if flags.contains(.expendedEnergy) { size += 5 }
+            if flags.contains(.heartRate) { size += 1 }
+            if flags.contains(.metabolicEquivalent) { size += 1 }
+            if flags.contains(.elapsedTime) { size += 2 }
+            if flags.contains(.remainingTime) { size += 2 }
+            if flags.contains(.forceOnBelt) { size += 4 }
+            if flags.contains(.kingSmithSteps) { size += 3 }
+            return size
+        }
+
         public init?(bytes: [UInt8]) {
             guard let flagsRaw = FTMS.uint16LE(bytes[0...]) else { return nil }
             let flags = Flags(rawValue: flagsRaw)
@@ -163,7 +206,11 @@ public enum FTMS {
                 return bytes[offset..<(offset + count)]
             }
 
-            if !moreData {
+            // The spec says the speed field is absent when "More Data" is set. Firmware does not
+            // always agree — KS Fit's own parser reads the speed regardless — so trust the packet
+            // length: if there is room for a speed field in front of the announced fields, it is one.
+            let roomForSpeed = bytes.count >= 4 + TreadmillData.optionalFieldsSize(flags)
+            if !moreData || roomForSpeed {
                 guard let speed = take(2) else { return nil }
                 speedHundredths = FTMS.uint16LE(speed)
             }
@@ -226,6 +273,8 @@ public enum FTMS {
         private var steps = 0
         /// Last target speed the belt acknowledged, in 0.01 km/h.
         private var targetHundredths: UInt16 = 0
+        /// Last instantaneous speed seen, for packets that carry none.
+        private var speedHundredths: UInt16 = 0
 
         public init() {}
 
@@ -234,14 +283,12 @@ public enum FTMS {
             targetHundredths = hundredths
         }
 
-        /// Feed one notification. Returns a status once a complete update has arrived.
+        /// Feed one notification. Every parseable packet yields a status: fields it omits keep
+        /// their last value, so a continuation packet refreshes the counters it does carry rather
+        /// than being held back for a final packet the firmware may never send.
         public mutating func ingest(_ bytes: [UInt8], now: Date = Date()) -> PadStatus? {
             guard let part = TreadmillData(bytes: bytes) else { return nil }
             merge(part)
-            // A continuation packet's fields are folded in above; the packet that carries the
-            // speed completes the update and is the one that becomes a status.
-            if part.moreData { return nil }
-            let speedHundredths = part.speedHundredths ?? 0
             let speedRaw = FTMS.tenths(fromHundredths: speedHundredths)
             return PadStatus(
                 beltState: speedRaw > 0 ? .running : .stopped,
@@ -259,6 +306,7 @@ public enum FTMS {
         }
 
         private mutating func merge(_ part: TreadmillData) {
+            if let v = part.speedHundredths { speedHundredths = v }
             if let d = part.totalDistanceMetres { distanceMetres = d }
             if let t = part.elapsedSeconds { elapsed = t }
             if let s = part.steps { steps = s }

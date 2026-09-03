@@ -140,6 +140,10 @@ public final class FTMSDialect: BeltDialect {
     public static let speedRangeUUID = CBUUID(string: String(format: "%04X", FTMS.supportedSpeedRangeUUID16))
     public static let controlPointUUID = CBUUID(string: String(format: "%04X", FTMS.controlPointUUID16))
     public static let machineStatusUUID = CBUUID(string: String(format: "%04X", FTMS.machineStatusUUID16))
+    public static let featureUUID = CBUUID(string: String(format: "%04X", FTMS.featureUUID16))
+    public static let trainingStatusUUID = CBUUID(string: String(format: "%04X", FTMS.trainingStatusUUID16))
+    public static let deviceInformationServiceUUID = CBUUID(string: String(format: "%04X", FTMS.deviceInformationServiceUUID16))
+    public static let softwareRevisionUUID = CBUUID(string: String(format: "%04X", FTMS.softwareRevisionUUID16))
     /// KingSmith's vendor "supplement" service on `KS-HD-*` belts (Z1, Z1F).
     public static let supplementServiceUUID = CBUUID(string: FTMS.Supplement.serviceUUID)
     public static let supplementNotifyUUID = CBUUID(string: FTMS.Supplement.notifyUUID)
@@ -149,16 +153,22 @@ public final class FTMSDialect: BeltDialect {
     /// The firmware replays its last event the moment notifications are enabled — usually a
     /// stale "stopped" from before we connected. Not news, so it is not logged.
     private var sawFirstMachineEvent = false
+    /// Treadmill Data frames the parser could not read are logged, a few per connection, so a
+    /// belt speaking an unexpected layout shows up in the log instead of as silence.
+    private var unparsedFramesLogged = 0
 
     public init() {}
 
     public var family: PadFamily { .ftms }
     public var scanServiceUUIDs: [CBUUID] { [FTMSDialect.serviceUUID] }
-    public var serviceUUIDs: [CBUUID] { [FTMSDialect.serviceUUID, FTMSDialect.supplementServiceUUID] }
+    public var serviceUUIDs: [CBUUID] {
+        [FTMSDialect.serviceUUID, FTMSDialect.supplementServiceUUID, FTMSDialect.deviceInformationServiceUUID]
+    }
     public var characteristicUUIDs: [CBUUID] {
-        [FTMSDialect.treadmillDataUUID, FTMSDialect.speedRangeUUID,
-         FTMSDialect.controlPointUUID, FTMSDialect.machineStatusUUID,
-         FTMSDialect.supplementNotifyUUID, FTMSDialect.supplementWriteUUID]
+        [FTMSDialect.treadmillDataUUID, FTMSDialect.speedRangeUUID, FTMSDialect.featureUUID,
+         FTMSDialect.controlPointUUID, FTMSDialect.machineStatusUUID, FTMSDialect.trainingStatusUUID,
+         FTMSDialect.supplementNotifyUUID, FTMSDialect.supplementWriteUUID,
+         FTMSDialect.softwareRevisionUUID]
     }
     public var requiredCharacteristicUUIDs: [CBUUID] {
         [FTMSDialect.controlPointUUID, FTMSDialect.treadmillDataUUID]
@@ -178,14 +188,22 @@ public final class FTMSDialect: BeltDialect {
     /// list before it touches the Control Point, and the firmware treats that as the handshake
     /// that unlocks control: a Z1F never answers a Control Point command without it. Steps whose
     /// characteristic the belt lacks are skipped by the controller, so this is harmless elsewhere.
+    ///
+    /// The order follows the vendor app's connection sequence as decompiled: capability reads,
+    /// then the FTMS subscriptions, then the supplement channel, then device info, then the
+    /// handshake, then request control.
     public var setupSteps: [BeltSetupStep] {
         [
-            .subscribe(FTMSDialect.treadmillDataUUID, pauseAfter: 0.1),
-            .subscribe(FTMSDialect.machineStatusUUID, pauseAfter: 0.2),
-            .subscribe(FTMSDialect.controlPointUUID, pauseAfter: 0.3),
-            .subscribe(FTMSDialect.supplementNotifyUUID, pauseAfter: 0.3),
+            .read(FTMSDialect.featureUUID),
             .read(FTMSDialect.speedRangeUUID),
+            .subscribe(FTMSDialect.machineStatusUUID, pauseAfter: 0.1),
+            .subscribe(FTMSDialect.trainingStatusUUID, pauseAfter: 0.2),
+            .subscribe(FTMSDialect.controlPointUUID, pauseAfter: 0.3),
+            .subscribe(FTMSDialect.treadmillDataUUID, pauseAfter: 0.3),
+            .subscribe(FTMSDialect.supplementNotifyUUID, pauseAfter: 0.3),
+            .read(FTMSDialect.softwareRevisionUUID),
             .write(FTMSDialect.handshake),
+            .write(BeltWrite(characteristic: FTMSDialect.supplementWriteUUID, bytes: FTMS.Supplement.propertyListBareBytes)),
             .write(BeltWrite(characteristic: FTMSDialect.controlPointUUID, bytes: FTMS.requestControlBytes)),
         ]
     }
@@ -223,7 +241,25 @@ public final class FTMSDialect: BeltDialect {
     public func decode(characteristic: CBUUID, bytes: [UInt8], now: Date) -> [BeltEvent] {
         switch characteristic {
         case FTMSDialect.treadmillDataUUID:
-            return assembler.ingest(bytes, now: now).map { [.status($0)] } ?? []
+            if let status = assembler.ingest(bytes, now: now) { return [.status(status)] }
+            guard unparsedFramesLogged < 3 else { return [] }
+            unparsedFramesLogged += 1
+            return [.note("Unreadable treadmill data frame: " + bytes.map { String(format: "%02x", $0) }.joined(separator: " "),
+                          isWarning: true)]
+
+        case FTMSDialect.trainingStatusUUID:
+            guard bytes.count >= 2 else { return [.unknown(bytes)] }
+            return [.note("Training status: \(FTMS.trainingStatusLabel(bytes[1]))", isWarning: false)]
+
+        case FTMSDialect.featureUUID:
+            guard bytes.count >= 8 else { return [.unknown(bytes)] }
+            let machine = bytes[0..<4].reversed().map { String(format: "%02x", $0) }.joined()
+            let target = bytes[4..<8].reversed().map { String(format: "%02x", $0) }.joined()
+            return [.note("Machine features 0x\(machine), target features 0x\(target)", isWarning: false)]
+
+        case FTMSDialect.softwareRevisionUUID:
+            let text = String(decoding: bytes.filter { $0 != 0 }, as: UTF8.self)
+            return [.note("Belt firmware: \(text.isEmpty ? "unknown" : text)", isWarning: false)]
 
         case FTMSDialect.machineStatusUUID:
             guard let event = FTMS.MachineEvent(bytes: bytes) else { return [.unknown(bytes)] }
@@ -269,5 +305,6 @@ public final class FTMSDialect: BeltDialect {
     public func resetConnectionState() {
         assembler = FTMS.StatusAssembler()
         sawFirstMachineEvent = false
+        unparsedFramesLogged = 0
     }
 }
