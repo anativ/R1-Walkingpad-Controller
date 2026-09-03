@@ -163,8 +163,20 @@ public final class PadController: NSObject, ObservableObject {
     private var speedConfirmTimer: Timer?
     private var heldSpeedTimer: Timer?
     private var staleStatusTimer: Timer?
+    private var firstStatusTimer: Timer?
     private var readyAt: Date?
+    /// Bring-up steps still to run, the characteristic whose callback the current step waits on,
+    /// and the pause to observe once it arrives. Each step is bounded by `setupStepBudget`.
+    private var setupQueue: [BeltSetupStep] = []
+    private var setupAwaiting: CBUUID?
+    private var setupPauseAfter: TimeInterval = 0
+    private var setupStepTimer: Timer?
     private var setupWorkItem: DispatchWorkItem?
+    /// Longest wait for macOS to confirm one bring-up step (a notification enable, a read, a
+    /// write). Missing confirmations are logged and skipped; the connect budget still caps the whole.
+    private static let setupStepBudget: TimeInterval = 2.0
+    /// A belt that pushes status should have said something this soon after "Ready".
+    private static let firstStatusBudget: TimeInterval = 5.0
     private var wantsConnection = false
     private var isBroadScanning = false
 
@@ -327,6 +339,12 @@ public final class PadController: NSObject, ObservableObject {
         isReady = false
         setupWorkItem?.cancel()
         setupWorkItem = nil
+        setupQueue.removeAll()
+        setupAwaiting = nil
+        setupStepTimer?.invalidate()
+        setupStepTimer = nil
+        firstStatusTimer?.invalidate()
+        firstStatusTimer = nil
         queue.removeAll()
         inFlightSpeedRaw = nil
         targetSpeedRaw = nil
@@ -750,36 +768,78 @@ extension PadController: CBPeripheralDelegate {
         runSetup(dialect.setupSteps, on: peripheral)
     }
 
-    /// Walk the dialect's bring-up sequence, honouring the pauses it asks for, and declare the
-    /// link ready at the end. Cancelled wholesale if the peripheral goes away in the middle.
+    /// Walk the dialect's bring-up sequence one confirmed step at a time.
+    ///
+    /// Each step is issued and then *waited for*: a notification enable until macOS reports the
+    /// descriptor written, a read until its value arrives, a write until it is acknowledged. Only
+    /// then does the dialect's pause run and the next step start, and only after the last step is
+    /// the link declared ready. Advancing on timers alone declared "Ready" on a Z1F before its
+    /// notifications were actually on, so no status ever arrived and every command was ignored.
+    /// A step that is never confirmed is logged and skipped after `setupStepBudget`; the connect
+    /// budget bounds the whole sequence (invariant 1).
     private func runSetup(_ steps: [BeltSetupStep], on peripheral: CBPeripheral) {
-        guard let step = steps.first else {
+        setupQueue = steps
+        advanceSetup(on: peripheral)
+    }
+
+    private func advanceSetup(on peripheral: CBPeripheral) {
+        setupStepTimer?.invalidate()
+        setupStepTimer = nil
+        setupAwaiting = nil
+        guard peripheral === self.peripheral, !isReady else { return }
+        guard !setupQueue.isEmpty else {
             finishSetup(peripheral)
             return
         }
-        var pause: TimeInterval = 0
+        let step = setupQueue.removeFirst()
+        setupPauseAfter = 0
         switch step {
         case .subscribe(let uuid, let pauseAfter):
-            if let characteristic = characteristics[uuid] {
-                peripheral.setNotifyValue(true, for: characteristic)
-            }
-            pause = pauseAfter
+            guard let characteristic = characteristics[uuid] else { advanceSetup(on: peripheral); return }
+            setupAwaiting = uuid
+            setupPauseAfter = pauseAfter
+            peripheral.setNotifyValue(true, for: characteristic)
         case .read(let uuid):
-            if let characteristic = characteristics[uuid] { peripheral.readValue(for: characteristic) }
+            guard let characteristic = characteristics[uuid] else { advanceSetup(on: peripheral); return }
+            setupAwaiting = uuid
+            peripheral.readValue(for: characteristic)
         case .write(let write):
-            if let characteristic = characteristics[write.characteristic] {
-                perform(write, on: peripheral, characteristic: characteristic)
-                lastSendAt = Date()
-                appendLog("TX \(write.bytes.map { String(format: "%02x", $0) }.joined(separator: " "))", .tx)
+            guard let characteristic = characteristics[write.characteristic] else { advanceSetup(on: peripheral); return }
+            appendLog("TX \(write.bytes.map { String(format: "%02x", $0) }.joined(separator: " "))", .tx)
+            lastSendAt = Date()
+            // A write without response gets no callback; give the belt a beat instead.
+            if characteristic.properties.contains(.write) {
+                setupAwaiting = write.characteristic
+            } else {
+                setupPauseAfter = 0.1
             }
+            perform(write, on: peripheral, characteristic: characteristic)
         }
-        let remaining = Array(steps.dropFirst())
+        if setupAwaiting != nil {
+            setupStepTimer = Timer.scheduledTimer(
+                withTimeInterval: PadController.setupStepBudget, repeats: false
+            ) { [weak self] _ in
+                guard let self, let waiting = self.setupAwaiting else { return }
+                self.appendLog("No confirmation for \(waiting) after \(Int(PadController.setupStepBudget))s — continuing", .warning)
+                self.completeSetupStep(for: waiting)
+            }
+        } else {
+            completeSetupStep(for: nil)
+        }
+    }
+
+    /// The step waiting on `uuid` is done (or given up on): observe its pause, then continue.
+    private func completeSetupStep(for uuid: CBUUID?) {
+        guard !isReady, let peripheral, uuid == setupAwaiting else { return }
+        setupStepTimer?.invalidate()
+        setupStepTimer = nil
+        setupAwaiting = nil
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.peripheral === peripheral else { return }
-            self.runSetup(remaining, on: peripheral)
+            self.advanceSetup(on: peripheral)
         }
         setupWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + pause, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + setupPauseAfter, execute: item)
     }
 
     private func finishSetup(_ peripheral: CBPeripheral) {
@@ -788,10 +848,25 @@ extension PadController: CBPeripheralDelegate {
         connectDeadlineTimer?.invalidate()
         connectDeadlineTimer = nil
         state = .connected(peripheral.name ?? "WalkingPad")
-        appendLog("Ready", .info)
+        let notifying = characteristics.values.filter(\.isNotifying).map(\.uuid.uuidString).sorted()
+        appendLog("Ready — notifications on: \(notifying.isEmpty ? "none" : notifying.joined(separator: ", "))", .info)
         startTimers()
         if dialect.pollsForStatus { send(.askStats) }
         if dialect.family.supportsStoredSession { send(.askHistory) }
+        if !dialect.pollsForStatus {
+            // Silence here is the one symptom that distinguishes "connected" from "working".
+            firstStatusTimer = Timer.scheduledTimer(
+                withTimeInterval: PadController.firstStatusBudget, repeats: false
+            ) { [weak self] _ in
+                guard let self, self.isReady, self.status == nil else { return }
+                self.appendLog(
+                    "No status from the belt \(Int(PadController.firstStatusBudget))s after connecting — its "
+                    + "notifications may not be active. Power-cycle the belt and reconnect; if this repeats, "
+                    + "copy this log.",
+                    .warning
+                )
+            }
+        }
     }
 
     public func peripheral(
@@ -799,12 +874,19 @@ extension PadController: CBPeripheralDelegate {
     ) {
         if let error {
             appendLog("Could not enable notifications on \(characteristic.uuid): \(error.localizedDescription)", .warning)
+        } else {
+            appendLog("Notifications \(characteristic.isNotifying ? "on" : "off") for \(characteristic.uuid)", .info)
         }
+        completeSetupStep(for: characteristic.uuid)
     }
 
     public func peripheral(
         _ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?
     ) {
+        if let error {
+            appendLog("Read of \(characteristic.uuid) failed: \(error.localizedDescription)", .warning)
+        }
+        defer { completeSetupStep(for: characteristic.uuid) }
         guard let data = characteristic.value else { return }
         let bytes = [UInt8](data)
         for event in dialect.decode(characteristic: characteristic.uuid, bytes: bytes, now: Date()) {
@@ -858,8 +940,9 @@ extension PadController: CBPeripheralDelegate {
         _ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?
     ) {
         if let error {
-            appendLog("Write failed: \(error.localizedDescription)", .warning)
+            appendLog("Write to \(characteristic.uuid) failed: \(error.localizedDescription)", .warning)
         }
+        completeSetupStep(for: characteristic.uuid)
     }
 }
 
