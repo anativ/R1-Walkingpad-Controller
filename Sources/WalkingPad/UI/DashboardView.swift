@@ -21,9 +21,11 @@ struct DashboardView: View {
                         ceiling: app.effectiveMaxSpeed
                     )
                 }
-                ModePickerView()
+                // Modes and the stored-session query are classic-protocol features; on a Z1 they
+                // would be buttons that do nothing.
+                if app.padFamily.supportsModes { ModePickerView() }
                 AllTimeSummaryView()
-                StoredSessionView()
+                if app.padFamily.supportsStoredSession { StoredSessionView() }
                 DisclosureGroup("Diagnostics", isExpanded: $showDiagnostics) {
                     DiagnosticsView()
                 }
@@ -67,7 +69,7 @@ struct ConnectionBar: View {
                     Text("Signal \(rssi) dBm")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                } else if let hint = app.controller.state.hint {
+                } else if let hint = app.controller.state.hint(for: app.padFamily) {
                     Text(hint)
                         .font(.caption2)
                         .foregroundStyle(.secondary)

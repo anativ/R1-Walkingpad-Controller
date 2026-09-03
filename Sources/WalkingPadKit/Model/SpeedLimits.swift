@@ -24,6 +24,27 @@ public enum SpeedLimits {
         return min(max(minRunningKph, requested), hardMaxKph)
     }
 
+    /// The ceiling once the belt's own reported maximum is taken into account.
+    ///
+    /// An FTMS belt states its range (the Z1F: 1–6 km/h). Asking for more is refused with an
+    /// "invalid parameter", so the slider and presets should stop where the belt does rather than
+    /// offer speeds that silently fail.
+    public static func effectiveCeiling(
+        walkingCeilingKph: Double, isRunningMode: Bool, beltMaxKph: Double?
+    ) -> Double {
+        let ceiling = effectiveCeiling(walkingCeilingKph: walkingCeilingKph, isRunningMode: isRunningMode)
+        guard let beltMaxKph, beltMaxKph.isFinite, beltMaxKph >= minRunningKph else { return ceiling }
+        return min(ceiling, beltMaxKph)
+    }
+
+    /// Lift a non-zero request to the belt's own minimum, where it reports one.
+    ///
+    /// Below its minimum the belt refuses the speed outright; 0 stays 0 because it means stop.
+    public static func liftedToBeltMinimum(_ kph: Double, beltMinKph: Double?, ceilingKph: Double) -> Double {
+        guard kph > 0, let beltMinKph, beltMinKph.isFinite, beltMinKph > 0 else { return kph }
+        return min(max(kph, beltMinKph), ceilingKph)
+    }
+
     /// Whether the app must itself command a lower speed after the ceiling changed.
     ///
     /// - Parameters:

@@ -74,6 +74,15 @@ let allChecks: [(String, () throws -> Void)] = [
     ("programs saved by earlier builds still decode", programsSavedByEarlierBuildsStillDecode),
     ("applyCeiling reports who drives the belt", applyCeilingReportsWhoDrivesTheBelt),
     ("ceiling correction covers the in-flight race", ceilingCorrectionCoversTheInFlightRace),
+    ("ftms treadmill data becomes a status", ftmsTreadmillDataBecomesAStatus),
+    ("ftms more-data packets merge into one status", ftmsMoreDataPacketsAreMergedIntoOneStatus),
+    ("ftms speed units round trip without drift", ftmsSpeedUnitsRoundTripWithoutDrift),
+    ("ftms dialect encodes only what the belt has", ftmsDialectEncodesOnlyWhatTheBeltHas),
+    ("ftms responses and events are understood", ftmsResponsesAndEventsAreUnderstood),
+    ("ftms holds speed until the belt moves", ftmsHoldsSpeedUntilTheBeltMoves),
+    ("ftms setup is staggered, ends with request control", ftmsSetupIsStaggeredAndEndsWithRequestControl),
+    ("belt family is remembered and explained", beltFamilyIsRememberedAndExplained),
+    ("belt-reported range tightens the ceiling", beltReportedRangeTightensTheCeiling),
 ]
 
 func usage() -> Never {
@@ -85,13 +94,36 @@ func usage() -> Never {
       padctl speed <kph>    Connect, set speed, keep printing status (Ctrl-C to stop)
       padctl stop           Connect and stop the belt
 
+    Options (before the command):
+      --model classic       R1 Pro / A1 / C1 / P1 — the original WalkingPad protocol (default)
+      --model z1            Z1 / Z1F — the FTMS protocol (also: --z1)
+
     The watch/speed/stop commands need Bluetooth permission for the terminal app.
     If they hang at "Searching", grant it in System Settings > Privacy & Security > Bluetooth.
     """)
     exit(2)
 }
 
-let arguments = Array(CommandLine.arguments.dropFirst())
+var arguments = Array(CommandLine.arguments.dropFirst())
+var family: PadFamily = .default
+while let flag = arguments.first, flag.hasPrefix("--") {
+    arguments.removeFirst()
+    switch flag {
+    case "--z1":
+        family = .ftms
+    case "--model":
+        guard let value = arguments.first else { usage() }
+        arguments.removeFirst()
+        switch value.lowercased() {
+        case "classic", "r1", "r1pro", "a1", "c1", "p1": family = .classic
+        case "z1", "z1f", "ftms": family = .ftms
+        default:
+            print("unknown model '\(value)' — use classic or z1"); exit(2)
+        }
+    default:
+        usage()
+    }
+}
 guard let command = arguments.first else { usage() }
 
 switch command {
@@ -101,6 +133,7 @@ case "selftest":
 
 case "watch", "speed", "stop":
     let controller = PadController()
+    controller.family = family
     var targetSpeed: Double?
     if command == "speed" {
         guard arguments.count > 1, let kph = Double(arguments[1]), kph.isFinite else {
@@ -138,7 +171,7 @@ case "watch", "speed", "stop":
         }
     }
 
-    print("Connecting…  (Ctrl-C to quit)")
+    print("Connecting to a \(family.label)…  (Ctrl-C to quit)")
     controller.connect()
 
     // Surface connection progress from the controller's log.

@@ -80,10 +80,12 @@ struct WalkingPadApp: App {
                                   || (!app.isRunning(algorithm) && !app.canStart(algorithm)))
                     }
                 }
-                Divider()
-                ForEach(PadMode.allCases, id: \.self) { mode in
-                    Button("Mode: \(mode.label)") { app.setMode(mode) }
-                        .disabled(!app.isConnected)
+                if app.padFamily.supportsModes {
+                    Divider()
+                    ForEach(PadMode.allCases, id: \.self) { mode in
+                        Button("Mode: \(mode.label)") { app.setMode(mode) }
+                            .disabled(!app.isConnected)
+                    }
                 }
                 Divider()
                 Button(app.isConnected ? "Disconnect" : "Connect") { app.toggleConnection() }

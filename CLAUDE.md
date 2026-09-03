@@ -1,7 +1,9 @@
 # WalkingPad R1 Pro Controller — working notes
 
 A native macOS app (SwiftUI + CoreBluetooth) that monitors and controls a KingSmith WalkingPad
-treadmill over BLE. No dependencies, no vendor account.
+treadmill over BLE. No dependencies, no vendor account. Two belt families, chosen by the user in
+Settings and remembered: the classic R1 Pro / A1 / C1 / P1 protocol (service `FE00`) and the
+Z1 / Z1F's Fitness Machine Service (`1826`). See [ADR 0004](docs/adr/0004-belt-dialects.md).
 
 ## Git workflow for this repo
 
@@ -73,12 +75,25 @@ cannot see the app. Verify through unified logging instead:
 5. **Speeds are integers in 0.1 km/h units** wherever they are stored or stepped, never `Double`
    km/h — a program stepping by 0.1 for an hour must not drift off the grid.
 6. **The user's speed ceiling always wins** (default 6.0, hard max 10.0). This drives a motorised
-   treadmill someone is standing on; clamp at the last moment before the write.
+   treadmill someone is standing on; clamp at the last moment before the write. A belt that
+   reports its own range (FTMS) tightens the ceiling further; it never loosens it.
+7. **Everything protocol-specific goes through a `BeltDialect`**, never into `PadController`.
+   The controller scans, connects, keeps deadlines and paces the queue; the dialect says which
+   service to scan, what to subscribe to (and in what order), how a `PadCommand` becomes bytes
+   and how bytes become a `PadStatus`. Adding a belt means adding a dialect, not a branch.
+8. **On an FTMS belt a speed target must never reach the wire while the motor is spinning up** —
+   the firmware drops the link. The controller holds the speed until the belt reports movement,
+   waits `startSettleDelay`, then sends it; a stop or a newer speed cancels the hold, and the
+   hold itself has a deadline (invariant 1).
 
 ## Layout
 
 ```
-Sources/WalkingPadKit/   protocol, BLE controller, metrics, programs, history  (no UI)
+Sources/WalkingPadKit/   protocol, BLE controller + dialects, metrics, programs, history  (no UI)
+  Protocol/PadPacket.swift, PadStatus.swift   classic F7…FD frames
+  Protocol/FTMS.swift                         Fitness Machine Service codec (Z1 / Z1F)
+  Protocol/PadFamily.swift                    the user-facing model choice
+  BLE/BeltDialect.swift                       ClassicDialect + FTMSDialect
 Sources/WalkingPad/      SwiftUI app
 Sources/padctl/          CLI diagnostics + the check suite
 Support/                 Info.plist for the app and for padctl
@@ -86,6 +101,9 @@ tools/MakeIcon.swift     draws AppIcon.icns
 docs/adr/                architecture decision records — add one for consequential decisions
 ```
 
-The BLE protocol was reverse engineered by
-[ph4r05/ph4-walkingpad](https://github.com/ph4r05/ph4-walkingpad); this is an independent native
-Swift implementation. Not affiliated with KingSmith.
+The classic protocol was reverse engineered by
+[ph4r05/ph4-walkingpad](https://github.com/ph4r05/ph4-walkingpad); the FTMS specifics come from
+[mcdax/walkingpad-controller](https://github.com/mcdax/walkingpad-controller). This is an
+independent native Swift implementation. Not affiliated with KingSmith. The FTMS path was built
+from those references and the spec, without a Z1F in hand — the first thing to do with real
+hardware is `./dist/padctl --z1 watch` and compare the log against `docs/adr/0004-belt-dialects.md`.

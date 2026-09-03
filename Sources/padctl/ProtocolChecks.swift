@@ -1,3 +1,4 @@
+import CoreBluetooth
 import Foundation
 import WalkingPadKit
 
@@ -1575,4 +1576,245 @@ func ceilingCorrectionCoversTheInFlightRace() throws {
     check(!SpeedLimits.needsCorrectiveWrite(
         programStillDriving: false, isConnected: true, beltIsMovingOrAboutTo: true,
         commandedSpeedKph: .nan, ceilingKph: 6.0))
+}
+
+// MARK: - Belt families and the FTMS (Z1 / Z1F) protocol
+
+/// A Z1 frame with the fields KingSmith sends: speed, total distance, elapsed time, steps.
+/// 3.50 km/h, 1234 m, 554 s, 977 steps.
+private let ftmsFrame: [UInt8] = FTMS.TreadmillData.encode(
+    speedHundredths: 350, totalDistanceMetres: 1234, elapsedSeconds: 554, steps: 977
+)
+
+func ftmsTreadmillDataBecomesAStatus() throws {
+    // Layout check against hand-assembled bytes: flags 0x2404 = distance | elapsed | KS steps.
+    check(ftmsFrame == [0x04, 0x24, 0x5E, 0x01, 0xD2, 0x04, 0x00, 0x2A, 0x02, 0xD1, 0x03, 0x00],
+          "encoder must match the FTMS field order")
+
+    var assembler = FTMS.StatusAssembler()
+    let status = try require(assembler.ingest(ftmsFrame))
+    check(status.speedRaw == 35, "3.50 km/h is 35 tenths")
+    check(status.speedKph == 3.5)
+    check(status.beltState == .running)
+    check(status.mode == .manual, "FTMS belts are always under manual (app) control")
+    check(status.elapsed == 554)
+    check(status.distanceRaw == 123, "1234 m is 123 units of 10 m")
+    check(status.steps == 977)
+    check(status.isMoving)
+    check(status.raw == ftmsFrame, "diagnostics show the FTMS bytes as received")
+
+    // A stopped belt reports speed 0, and counters carry over from the last frame that had them.
+    let idle = try require(assembler.ingest(FTMS.TreadmillData.encode(speedHundredths: 0)))
+    check(idle.beltState == .stopped)
+    check(!idle.isMoving)
+    check(idle.elapsed == 554 && idle.distanceRaw == 123 && idle.steps == 977,
+          "omitted fields keep their last value rather than dropping to zero")
+}
+
+/// The spec allows one update to be split over several notifications: the parts flagged
+/// "more data" carry no speed, and the final packet completes the update.
+func ftmsMoreDataPacketsAreMergedIntoOneStatus() throws {
+    var assembler = FTMS.StatusAssembler()
+    let part = FTMS.TreadmillData.encode(moreData: true, totalDistanceMetres: 2500, elapsedSeconds: 1800)
+    check(assembler.ingest(part) == nil, "a continuation packet must not produce a status")
+    let final = FTMS.TreadmillData.encode(speedHundredths: 500, steps: 3000)
+    let status = try require(assembler.ingest(final))
+    check(status.speedRaw == 50)
+    check(status.distanceRaw == 250)
+    check(status.elapsed == 1800)
+    check(status.steps == 3000)
+
+    // Garbage in, nothing out — never a crash on a short packet.
+    check(FTMS.TreadmillData(bytes: [0x04]) == nil)
+    check(FTMS.TreadmillData(bytes: [0x04, 0x24, 0x5E]) == nil, "speed field cut short")
+    let truncated = try require(FTMS.TreadmillData(bytes: [0x04, 0x24, 0x5E, 0x01, 0xD2]))
+    check(truncated.speedHundredths == 350 && truncated.totalDistanceMetres == nil,
+          "a truncated optional field is dropped, the ones before it kept")
+}
+
+/// FTMS speaks in 0.01 km/h; the app in integer tenths. Every tenth must survive the round trip
+/// exactly — a program stepping by 0.1 km/h for an hour cannot be allowed to drift.
+func ftmsSpeedUnitsRoundTripWithoutDrift() throws {
+    for tenths in UInt8(0)...UInt8(100) {
+        let bytes = FTMS.setSpeedBytes(raw: tenths)
+        check(bytes.count == 3 && bytes[0] == 0x02)
+        let hundredths = UInt16(bytes[1]) | (UInt16(bytes[2]) << 8)
+        check(hundredths == UInt16(tenths) * 10)
+        check(FTMS.tenths(fromHundredths: hundredths) == tenths, "tenth \(tenths) drifted")
+    }
+    check(FTMS.setSpeedBytes(raw: 40) == [0x02, 0x90, 0x01], "4.0 km/h is 0x0190 little-endian")
+    // Odd hundredths from the belt round half up onto the grid.
+    check(FTMS.tenths(fromHundredths: 344) == 34)
+    check(FTMS.tenths(fromHundredths: 345) == 35)
+    check(FTMS.tenths(fromHundredths: 349) == 35)
+    check(FTMS.tenths(fromHundredths: 65535) == 255, "clamped, never trapped")
+    check(FTMS.thirtieths(fromHundredths: 400) == 120, "4.0 km/h is 120 thirtieths")
+}
+
+func ftmsDialectEncodesOnlyWhatTheBeltHas() throws {
+    let z1 = FTMSDialect()
+    let cp = FTMSDialect.controlPointUUID
+    check(z1.encode(.start) == BeltWrite(characteristic: cp, bytes: [0x07]))
+    check(z1.encode(.setSpeed(0)) == BeltWrite(characteristic: cp, bytes: [0x08, 0x01]),
+          "speed 0 is the app's stop, and becomes the FTMS stop")
+    check(z1.encode(.setSpeed(35)) == BeltWrite(characteristic: cp, bytes: [0x02, 0x5E, 0x01]))
+    check(z1.encode(.setMode(.manual)) == nil, "no mode byte on FTMS")
+    check(z1.encode(.askStats) == nil, "status is pushed, never polled")
+    check(z1.encode(.askHistory) == nil)
+    check(z1.encode(.setPreference(.maxSpeed, type: 0, value: 60)) == nil)
+    check(!z1.pollsForStatus)
+    check(z1.holdsSpeedUntilBeltMoves)
+
+    // The start sequence keeps its order once the frames the belt lacks are dropped.
+    let sequence = z1.supported([.setMode(.manual), .start, .setSpeed(30)])
+    check(sequence == [.start, .setSpeed(30)])
+
+    // The classic belt is untouched by all of this.
+    let classic = ClassicDialect()
+    for command in [PadCommand.askStats, .setSpeed(30), .setMode(.standby), .start, .askHistory,
+                    .setPreference(.childLock, type: 0, value: 1)] {
+        check(classic.encode(command) == BeltWrite(characteristic: ClassicDialect.writeUUID, bytes: command.bytes))
+    }
+    check(classic.pollsForStatus)
+    check(!classic.holdsSpeedUntilBeltMoves)
+    check(classic.supported([.setMode(.manual), .start, .setSpeed(30)]).count == 3)
+}
+
+func ftmsResponsesAndEventsAreUnderstood() throws {
+    let z1 = FTMSDialect()
+    let now = Date()
+
+    // Control Point indication: speed accepted.
+    let accepted = z1.decode(characteristic: FTMSDialect.controlPointUUID, bytes: [0x80, 0x02, 0x01], now: now)
+    check(accepted.contains(.speedCommandAccepted))
+    check(accepted.contains { if case .note(_, let warn) = $0 { return !warn }; return false })
+
+    // A refused "request control" is routine and must not be shouted about.
+    let refused = z1.decode(characteristic: FTMSDialect.controlPointUUID, bytes: [0x80, 0x00, 0x04], now: now)
+    check(refused.contains { if case .note(_, let warn) = $0 { return !warn }; return false })
+    check(!refused.contains(.speedCommandAccepted))
+
+    // An invalid speed is a warning the user should see.
+    let rejected = z1.decode(characteristic: FTMSDialect.controlPointUUID, bytes: [0x80, 0x02, 0x03], now: now)
+    check(rejected.contains { if case .note(let text, let warn) = $0 { return warn && text.contains("speed range") }; return false })
+
+    // Machine status: the very first event is the firmware replaying stale state — swallowed.
+    let replay = z1.decode(characteristic: FTMSDialect.machineStatusUUID, bytes: [0x02, 0x01], now: now)
+    check(replay.isEmpty, "first machine event is a replay, not news")
+    let started = z1.decode(characteristic: FTMSDialect.machineStatusUUID, bytes: [0x04], now: now)
+    check(started.contains { if case .note(let text, _) = $0 { return text.contains("started") }; return false })
+
+    // Target speed changed carries the value, which confirms the in-flight speed early.
+    let target = z1.decode(characteristic: FTMSDialect.machineStatusUUID, bytes: [0x05, 0x90, 0x01], now: now)
+    check(target.contains(.speedAccepted(40)))
+
+    // The safety key is always a warning.
+    let safety = z1.decode(characteristic: FTMSDialect.machineStatusUUID, bytes: [0x03], now: now)
+    check(safety.contains { if case .note(_, let warn) = $0 { return warn }; return false })
+
+    // Speed range read: 0.50–6.00 km/h in 0.10 steps.
+    let range = z1.decode(characteristic: FTMSDialect.speedRangeUUID, bytes: [0x32, 0x00, 0x58, 0x02, 0x0A, 0x00], now: now)
+    check(range.contains { event in
+        if case .speedRange(let r) = event { return r.minKph == 0.5 && r.maxKph == 6.0 && r.incrementKph == 0.1 }
+        return false
+    })
+
+    // Treadmill data flows through to a status; unknown characteristics are surfaced raw.
+    let status = z1.decode(characteristic: FTMSDialect.treadmillDataUUID, bytes: ftmsFrame, now: now)
+    check(status.count == 1)
+    if case .status(let s)? = status.first { check(s.speedRaw == 35) } else { fail("expected a status") }
+    check(z1.decode(characteristic: CBUUID(string: "2A00"), bytes: [1, 2], now: now) == [.unknown([1, 2])])
+
+    // A new connection forgets the replay flag and the counters.
+    z1.resetConnectionState()
+    check(z1.decode(characteristic: FTMSDialect.machineStatusUUID, bytes: [0x02, 0x01], now: now).isEmpty)
+}
+
+/// FTMS firmware crashes the link if a speed target lands while the motor is spinning up, so a
+/// speed waits for the belt to report movement. Classic belts take mode → start → speed as-is.
+func ftmsHoldsSpeedUntilTheBeltMoves() throws {
+    check(SpeedGate.shouldHold(.setSpeed(30), beltIsMoving: false, dialectHolds: true))
+    check(!SpeedGate.shouldHold(.setSpeed(30), beltIsMoving: true, dialectHolds: true))
+    check(!SpeedGate.shouldHold(.setSpeed(0), beltIsMoving: false, dialectHolds: true),
+          "a stop is never held back")
+    check(!SpeedGate.shouldHold(.start, beltIsMoving: false, dialectHolds: true))
+    check(!SpeedGate.shouldHold(.setSpeed(30), beltIsMoving: false, dialectHolds: false),
+          "the classic belt never holds")
+}
+
+func ftmsSetupIsStaggeredAndEndsWithRequestControl() throws {
+    let steps = FTMSDialect().setupSteps
+    var subscribed: [CBUUID] = []
+    var lastPause: TimeInterval = 0
+    for step in steps {
+        if case .subscribe(let uuid, let pause) = step {
+            subscribed.append(uuid)
+            check(pause >= 0.1, "every subscription is followed by a pause the firmware needs")
+            check(pause >= lastPause, "pauses grow the way the vendor app staggers them")
+            lastPause = pause
+        }
+    }
+    check(subscribed == [FTMSDialect.treadmillDataUUID, FTMSDialect.machineStatusUUID, FTMSDialect.controlPointUUID])
+    check(steps.contains(.read(FTMSDialect.speedRangeUUID)))
+    check(steps.last == .write(BeltWrite(characteristic: FTMSDialect.controlPointUUID, bytes: [0x00])),
+          "control is requested once everything is subscribed")
+    check(FTMSDialect().requiredCharacteristicUUIDs.contains(FTMSDialect.controlPointUUID))
+
+    let classic = ClassicDialect().setupSteps
+    check(classic == [.subscribe(ClassicDialect.notifyUUID, pauseAfter: 0)])
+    check(ClassicDialect().requiredCharacteristicUUIDs == [ClassicDialect.writeUUID])
+}
+
+func beltFamilyIsRememberedAndExplained() throws {
+    check(PadFamily.default == .classic, "existing installs keep working unchanged")
+    for family in PadFamily.allCases {
+        check(PadFamily(rawValue: family.rawValue) == family)
+        check(!family.label.isEmpty && !family.detail.isEmpty)
+        check(makeDialect(for: family).family == family)
+    }
+    check(PadFamily(rawValue: "garbage") == nil, "a corrupted preference falls back to the default")
+    check(Set(PadFamily.allCases.map(\.label)).count == PadFamily.allCases.count)
+
+    check(PadFamily.classic.supportsModes && PadFamily.classic.supportsBeltPreferences
+          && PadFamily.classic.supportsStoredSession)
+    check(!PadFamily.ftms.supportsModes && !PadFamily.ftms.supportsBeltPreferences
+          && !PadFamily.ftms.supportsStoredSession)
+
+    // The scan filter and the name fallback differ per family, so the wrong choice has to be
+    // explained where the user is looking.
+    check(FTMSDialect().scanServiceUUIDs == [CBUUID(string: "1826")])
+    check(ClassicDialect().scanServiceUUIDs == [CBUUID(string: "FE00")])
+    check(FTMSDialect().looksLikeBelt(name: "KS-HD-Z1F-3A2B"))
+    check(!ClassicDialect().looksLikeBelt(name: "KS-HD-Z1F-3A2B"), "a Z1 is not a classic belt")
+    check(ClassicDialect().looksLikeBelt(name: "WalkingPad"))
+    check(!FTMSDialect().looksLikeBelt(name: nil))
+
+    let notFound = PadConnectionState.notFound.hint(for: .ftms) ?? ""
+    check(notFound.contains(PadFamily.ftms.label) && notFound.contains("Settings"),
+          "no-belt hint names the family being looked for and where to change it")
+    let scanning = PadConnectionState.scanning.hint(for: .classic) ?? ""
+    check(scanning.contains(PadFamily.classic.label))
+    check(PadConnectionState.scanning.hint == nil, "the family-less hint is unchanged")
+    check(PadConnectionState.connected("x").hint(for: .ftms) == nil)
+}
+
+/// An FTMS belt states its own range, and refuses speeds outside it. The app's ceiling stops
+/// where the belt does, and a slow request is lifted to the belt's minimum — but 0 stays a stop.
+func beltReportedRangeTightensTheCeiling() throws {
+    // Z1F: 1.0–6.0 km/h. Run mode would otherwise offer 10.
+    check(SpeedLimits.effectiveCeiling(walkingCeilingKph: 6, isRunningMode: true, beltMaxKph: 6.0) == 6.0)
+    check(SpeedLimits.effectiveCeiling(walkingCeilingKph: 4, isRunningMode: false, beltMaxKph: 6.0) == 4.0,
+          "the user's lower ceiling still wins")
+    check(SpeedLimits.effectiveCeiling(walkingCeilingKph: 6, isRunningMode: true, beltMaxKph: nil) == 10.0,
+          "a classic belt reports no range and keeps the hardware maximum")
+    check(SpeedLimits.effectiveCeiling(walkingCeilingKph: 6, isRunningMode: true, beltMaxKph: 0) == 10.0,
+          "a nonsense range is ignored, not obeyed")
+    check(SpeedLimits.effectiveCeiling(walkingCeilingKph: 6, isRunningMode: true, beltMaxKph: .nan) == 10.0)
+
+    check(SpeedLimits.liftedToBeltMinimum(0.6, beltMinKph: 1.0, ceilingKph: 6) == 1.0)
+    check(SpeedLimits.liftedToBeltMinimum(3.0, beltMinKph: 1.0, ceilingKph: 6) == 3.0)
+    check(SpeedLimits.liftedToBeltMinimum(0, beltMinKph: 1.0, ceilingKph: 6) == 0, "zero means stop")
+    check(SpeedLimits.liftedToBeltMinimum(0.6, beltMinKph: nil, ceilingKph: 6) == 0.6)
+    check(SpeedLimits.liftedToBeltMinimum(0.6, beltMinKph: 8, ceilingKph: 6) == 6,
+          "the minimum can never push past the ceiling")
 }

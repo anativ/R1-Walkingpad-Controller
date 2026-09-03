@@ -28,6 +28,23 @@ public struct PadStatus: Equatable, Sendable {
         data.count >= 18 && data[0] == frameSignature[0] && data[1] == frameSignature[1]
     }
 
+    /// Field-by-field, for protocols that do not use the classic frame (see `FTMS.StatusAssembler`).
+    public init(
+        beltState: PadBeltState, speedRaw: UInt8, modeRaw: UInt8, elapsed: Int, distanceRaw: Int,
+        steps: Int, appSpeedRaw: UInt8, controllerButton: UInt8, raw: [UInt8], receivedAt: Date
+    ) {
+        self.beltState = beltState
+        self.speedRaw = speedRaw
+        self.modeRaw = modeRaw
+        self.elapsed = elapsed
+        self.distanceRaw = distanceRaw
+        self.steps = steps
+        self.appSpeedRaw = appSpeedRaw
+        self.controllerButton = controllerButton
+        self.raw = raw
+        self.receivedAt = receivedAt
+    }
+
     public init?(data: [UInt8], now: Date = Date()) {
         guard PadStatus.matches(data) else { return nil }
         beltState = PadBeltState(raw: data[2])

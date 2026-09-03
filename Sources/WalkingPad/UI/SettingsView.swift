@@ -22,6 +22,21 @@ struct AppPreferencesTab: View {
     @EnvironmentObject private var app: AppModel
     var body: some View {
         Form {
+            Section("Treadmill") {
+                Picker("Belt model", selection: Binding(
+                    get: { app.settings.padFamily },
+                    set: { app.setPadFamily($0) }
+                )) {
+                    ForEach(PadFamily.allCases) { Text($0.label).tag($0) }
+                }
+                Text(app.settings.padFamily.detail
+                     + " The app reconnects with the matching protocol when you change this, and "
+                     + "remembers the choice.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Section("Display") {
                 Picker("Units", selection: Binding(
                     get: { app.settings.unit },
@@ -264,6 +279,30 @@ struct BeltPreferencesTab: View {
     @State private var targetValue: Double = 30
 
     var body: some View {
+        if app.settings.padFamily.supportsBeltPreferences {
+            preferencesForm
+        } else {
+            Form {
+                Section {
+                    Text("The \(app.settings.padFamily.label) does not accept stored settings over "
+                         + "Bluetooth. Its max speed, child lock and units are set on the belt itself "
+                         + "with the remote or the KS Fit app. The speed limit under General still "
+                         + "applies to everything this app sends.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let range = app.controller.beltSpeedRange {
+                        LabeledContent("Belt reports", value: String(
+                            format: "%.1f–%.1f km/h", range.minKph, range.maxKph
+                        ))
+                    }
+                }
+            }
+            .formStyle(.grouped)
+        }
+    }
+
+    private var preferencesForm: some View {
         Form {
             Section {
                 Text("These settings are stored on the belt. It never reports them back, so the values shown here are what this app last sent, not necessarily what the belt holds.")

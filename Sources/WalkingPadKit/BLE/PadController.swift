@@ -24,10 +24,20 @@ public enum PadConnectionState: Equatable, Sendable {
     }
 
     /// Extra guidance shown under the status line, when there is something useful to say.
-    public var hint: String? {
+    public var hint: String? { hint(for: nil) }
+
+    /// The same guidance, naming the belt family being looked for. A Z1 owner whose app is still
+    /// set to the classic family sees "No belt found" forever otherwise, with no clue why.
+    public func hint(for family: PadFamily?) -> String? {
+        let modelNote = family.map {
+            " Looking for a \($0.label). Different model? Change it in Settings › General."
+        } ?? ""
         switch self {
         case .notFound:
-            return "Turn the belt on and leave it in standby (not off), keep it within a few metres, then try again."
+            return "Turn the belt on and leave it in standby (not off), keep it within a few metres, "
+                + "then try again." + modelNote
+        case .scanning:
+            return family == nil ? nil : String(modelNote.dropFirst())
         case .bluetoothUnavailable:
             return "Enable Bluetooth for WalkingPad in System Settings › Privacy & Security › Bluetooth."
         default:
@@ -52,11 +62,14 @@ public enum PadConnectionState: Equatable, Sendable {
 ///
 /// All CoreBluetooth callbacks are delivered on the main queue, so every property here is
 /// touched from the main thread only and is safe to bind straight into SwiftUI.
+///
+/// Everything protocol-specific lives in the `BeltDialect` chosen by `family`; this class only
+/// knows how to scan, connect, keep deadlines, and pace the command queue.
 public final class PadController: NSObject, ObservableObject {
-    // MARK: BLE identifiers (KingSmith WalkingPad)
-    public static let serviceUUID = CBUUID(string: "0000FE00-0000-1000-8000-00805F9B34FB")
-    public static let notifyUUID = CBUUID(string: "0000FE01-0000-1000-8000-00805F9B34FB")
-    public static let writeUUID = CBUUID(string: "0000FE02-0000-1000-8000-00805F9B34FB")
+    // MARK: BLE identifiers of the classic belt, kept for callers that still name them.
+    public static let serviceUUID = ClassicDialect.serviceUUID
+    public static let notifyUUID = ClassicDialect.notifyUUID
+    public static let writeUUID = ClassicDialect.writeUUID
 
     /// The belt drops commands that arrive too close together.
     private static let minimumCommandSpacing: TimeInterval = 0.7
@@ -69,6 +82,11 @@ public final class PadController: NSObject, ObservableObject {
     private static let connectBudget: TimeInterval = 12.0
     /// How long to wait for the belt to echo back a speed we asked for.
     private static let speedConfirmBudget: TimeInterval = 4.0
+    /// How long a held speed waits for the belt to start moving (FTMS cold start).
+    private static let startMovingBudget: TimeInterval = 15.0
+    /// Once the belt reports movement, how long to let the motor settle before the speed target
+    /// is written. The firmware drops the link if the two overlap; two seconds is comfortably clear.
+    public static let startSettleDelay: TimeInterval = 2.0
 
     @Published public private(set) var state: PadConnectionState = .idle {
         didSet {
@@ -86,16 +104,42 @@ public final class PadController: NSObject, ObservableObject {
     @Published public private(set) var log: [PadLogEntry] = []
     /// Speed we have asked for but not yet seen confirmed by the belt.
     @Published public private(set) var inFlightSpeedRaw: UInt8?
+    /// Speed limits the belt itself reported, where the protocol offers them.
+    @Published public private(set) var beltSpeedRange: FTMS.SpeedRange?
+
+    /// Which generation of belt to look for. Changing it mid-connection starts over with the new
+    /// protocol — a belt of one family is invisible to the other's scan.
+    public var family: PadFamily {
+        get { dialect.family }
+        set {
+            guard newValue != dialect.family else { return }
+            // Changing the model right after "No belt found" is almost always the fix for it, so
+            // that case starts a new search too rather than waiting for another click.
+            let resume = wantsConnection || state == .notFound
+            if state.isConnected || state.isBusy { disconnect() }
+            dialect = makeDialect(for: newValue)
+            appendLog("Belt model set to \(newValue.label)", .info)
+            if resume { connect() }
+        }
+    }
 
     public var onStatus: ((PadStatus) -> Void)?
 
+    private var dialect: BeltDialect = makeDialect(for: .default)
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
-    private var writeCharacteristic: CBCharacteristic?
+    /// Every characteristic the dialect asked for, once discovered.
+    private var characteristics: [CBUUID: CBCharacteristic] = [:]
+    private var pendingServiceDiscoveries = 0
+    private var isReady = false
 
     private var queue = CommandQueue()
     private var lastSendAt: Date?
     private var drainScheduled = false
+    /// A speed target waiting for the belt to report movement (see `BeltDialect.holdsSpeedUntilBeltMoves`).
+    private var heldSpeedRaw: UInt8?
+    /// The settle delay in progress, once the belt has reported movement.
+    private var heldSpeedRelease: DispatchWorkItem?
 
     private var pollTimer: Timer?
     private var rssiTimer: Timer?
@@ -103,6 +147,8 @@ public final class PadController: NSObject, ObservableObject {
     private var scanDeadlineTimer: Timer?
     private var connectDeadlineTimer: Timer?
     private var speedConfirmTimer: Timer?
+    private var heldSpeedTimer: Timer?
+    private var setupWorkItem: DispatchWorkItem?
     private var wantsConnection = false
     private var isBroadScanning = false
 
@@ -130,10 +176,7 @@ public final class PadController: NSObject, ObservableObject {
         if let peripheral {
             central.cancelPeripheralConnection(peripheral)
         }
-        self.peripheral = nil
-        writeCharacteristic = nil
-        queue.removeAll()
-        inFlightSpeedRaw = nil
+        resetConnectionArtifacts()
         state = .idle
         appendLog("Disconnected", .info)
     }
@@ -144,9 +187,13 @@ public final class PadController: NSObject, ObservableObject {
         if !broad { armScanDeadline() }
         isBroadScanning = broad
         state = .scanning
-        let services: [CBUUID]? = broad ? nil : [PadController.serviceUUID]
+        let services: [CBUUID]? = broad ? nil : dialect.scanServiceUUIDs
         central.scanForPeripherals(withServices: services, options: nil)
-        appendLog(broad ? "Scanning all BLE devices by name…" : "Scanning for WalkingPad service…", .info)
+        appendLog(
+            broad ? "Scanning all BLE devices by name…"
+                  : "Scanning for a \(dialect.family.label) (\(dialect.family == .ftms ? "FTMS" : "WalkingPad") service)…",
+            .info
+        )
 
         broadScanTimer?.invalidate()
         if !broad {
@@ -185,7 +232,11 @@ public final class PadController: NSObject, ObservableObject {
         stopScan()
         wantsConnection = false
         state = .notFound
-        appendLog("No belt found after \(Int(PadController.scanBudget))s — is it powered on?", .warning)
+        appendLog(
+            "No \(dialect.family.label) found after \(Int(PadController.scanBudget))s — is it powered on, "
+            + "and is the belt model in Settings right?",
+            .warning
+        )
     }
 
     /// Connecting needs its own deadline. `stopScan()` discards the scan budget the moment a belt
@@ -197,7 +248,7 @@ public final class PadController: NSObject, ObservableObject {
         connectDeadlineTimer = Timer.scheduledTimer(
             withTimeInterval: PadController.connectBudget, repeats: false
         ) { [weak self] _ in
-            guard let self, self.writeCharacteristic == nil else { return }
+            guard let self, !self.isReady else { return }
             self.abandonConnectAttempt("Belt found but never became ready")
         }
     }
@@ -220,6 +271,25 @@ public final class PadController: NSObject, ObservableObject {
         }
     }
 
+    /// A held speed is waiting on the motor. If the belt never starts, the wait has to end in a
+    /// state the UI can explain, not a spinner.
+    private func armHeldSpeedDeadline() {
+        heldSpeedTimer?.invalidate()
+        heldSpeedTimer = Timer.scheduledTimer(
+            withTimeInterval: PadController.startMovingBudget, repeats: false
+        ) { [weak self] _ in
+            guard let self, let held = self.heldSpeedRaw else { return }
+            self.heldSpeedRaw = nil
+            self.inFlightSpeedRaw = nil
+            self.appendLog(
+                "Belt did not start moving within \(Int(PadController.startMovingBudget))s, so "
+                + "\(String(format: "%.1f", Double(held) / 10)) km/h was not sent — check the safety key "
+                + "and that the belt is awake",
+                .warning
+            )
+        }
+    }
+
     /// Tear down a half-finished connection and land in a terminal state the UI can explain.
     private func abandonConnectAttempt(_ why: String) {
         connectDeadlineTimer?.invalidate()
@@ -236,16 +306,20 @@ public final class PadController: NSObject, ObservableObject {
     /// Everything that is only meaningful while a belt is attached.
     private func resetConnectionArtifacts() {
         peripheral = nil
-        writeCharacteristic = nil
+        characteristics.removeAll()
+        pendingServiceDiscoveries = 0
+        isReady = false
+        setupWorkItem?.cancel()
+        setupWorkItem = nil
         queue.removeAll()
         inFlightSpeedRaw = nil
+        dropHeldSpeed()
+        beltSpeedRange = nil
         speedConfirmTimer?.invalidate()
         speedConfirmTimer = nil
-    }
-
-    private func looksLikeBelt(name: String?) -> Bool {
-        guard let name = name?.lowercased() else { return false }
-        return ["walkingpad", "kingsmith", "ksmith", "r1 pro", "r1pro"].contains { name.contains($0) }
+        heldSpeedTimer?.invalidate()
+        heldSpeedTimer = nil
+        dialect.resetConnectionState()
     }
 
     // MARK: - Commands
@@ -256,7 +330,13 @@ public final class PadController: NSObject, ObservableObject {
             appendLog("Ignored \(command) — not connected", .warning)
             return
         }
-        if case .setSpeed(let raw) = command { inFlightSpeedRaw = raw }
+        guard dialect.encode(command) != nil else {
+            if !command.isStatusPoll {
+                appendLog("\(describe(command)) is not available on a \(dialect.family.label)", .warning)
+            }
+            return
+        }
+        if case .setSpeed(let raw) = command { noteSpeedRequested(raw) }
 
         queue.enqueue(command)
         scheduleDrain()
@@ -268,14 +348,42 @@ public final class PadController: NSObject, ObservableObject {
             appendLog("Ignored \(batch.count) commands — not connected", .warning)
             return
         }
+        let batch = dialect.supported(batch)
+        guard !batch.isEmpty else { return }
         if let speed = batch.compactMap({ command -> UInt8? in
             if case .setSpeed(let raw) = command { return raw }
             return nil
         }).last {
-            inFlightSpeedRaw = speed
+            noteSpeedRequested(speed)
         }
         queue.enqueue(batch: batch)
         scheduleDrain()
+    }
+
+    /// A newer speed supersedes anything still waiting for the motor.
+    private func noteSpeedRequested(_ raw: UInt8) {
+        inFlightSpeedRaw = raw
+        dropHeldSpeed()
+    }
+
+    /// Forget a speed that was waiting for the motor, and any settle delay running for it.
+    private func dropHeldSpeed() {
+        heldSpeedRaw = nil
+        heldSpeedTimer?.invalidate()
+        heldSpeedTimer = nil
+        heldSpeedRelease?.cancel()
+        heldSpeedRelease = nil
+    }
+
+    private func describe(_ command: PadCommand) -> String {
+        switch command {
+        case .askStats: return "Status poll"
+        case .setSpeed: return "Speed change"
+        case .setMode(let mode): return "Mode \(mode.label)"
+        case .start: return "Start"
+        case .askHistory: return "Stored-session query"
+        case .setPreference: return "Belt preference"
+        }
     }
 
     private func scheduleDrain() {
@@ -294,19 +402,60 @@ public final class PadController: NSObject, ObservableObject {
 
     /// Control commands always win over a queued status poll.
     private func sendNext() {
-        guard let command = queue.dequeue(),
-              let peripheral,
-              let characteristic = writeCharacteristic else { return }
+        guard let command = queue.dequeue(), let peripheral else { return }
 
-        let payload = Data(command.bytes)
-        let type: CBCharacteristicWriteType =
-            characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
-        peripheral.writeValue(payload, for: characteristic, type: type)
+        if SpeedGate.shouldHold(
+            command, beltIsMoving: status?.isMoving ?? false, dialectHolds: dialect.holdsSpeedUntilBeltMoves
+        ), case .setSpeed(let raw) = command {
+            heldSpeedRaw = raw
+            armHeldSpeedDeadline()
+            appendLog(
+                "Holding \(String(format: "%.1f", Double(raw) / 10)) km/h until the belt is moving", .info
+            )
+            return
+        }
+        if case .setSpeed(0) = command, heldSpeedRaw != nil {
+            // A stop cancels whatever speed was waiting to be applied.
+            dropHeldSpeed()
+        }
+
+        guard let write = dialect.encode(command),
+              let characteristic = characteristics[write.characteristic] else { return }
+        perform(write, on: peripheral, characteristic: characteristic)
         lastSendAt = Date()
         if case .setSpeed = command { armSpeedConfirmDeadline() }
         if !command.isStatusPoll {
-            appendLog("TX \(payload.map { String(format: "%02x", $0) }.joined(separator: " "))", .tx)
+            appendLog("TX \(write.bytes.map { String(format: "%02x", $0) }.joined(separator: " "))", .tx)
         }
+    }
+
+    private func perform(_ write: BeltWrite, on peripheral: CBPeripheral, characteristic: CBCharacteristic) {
+        let type: CBCharacteristicWriteType =
+            characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
+        peripheral.writeValue(Data(write.bytes), for: characteristic, type: type)
+    }
+
+    /// The belt started moving: give the motor a moment to settle, then release the speed that
+    /// was waiting for it. A stop or a newer speed in the meantime cancels the release.
+    private func releaseHeldSpeedIfMoving(_ status: PadStatus) {
+        guard heldSpeedRaw != nil, status.isMoving, heldSpeedRelease == nil else { return }
+        heldSpeedTimer?.invalidate()
+        heldSpeedTimer = nil
+        let release = DispatchWorkItem { [weak self] in
+            guard let self, let held = self.heldSpeedRaw else { return }
+            self.heldSpeedRelease = nil
+            self.heldSpeedRaw = nil
+            self.queue.enqueue(.setSpeed(held))
+            self.scheduleDrain()
+        }
+        heldSpeedRelease = release
+        DispatchQueue.main.asyncAfter(deadline: .now() + PadController.startSettleDelay, execute: release)
+    }
+
+    private func clearInFlightSpeed() {
+        inFlightSpeedRaw = nil
+        speedConfirmTimer?.invalidate()
+        speedConfirmTimer = nil
     }
 
     // MARK: - Convenience API
@@ -330,13 +479,14 @@ public final class PadController: NSObject, ObservableObject {
     }
 
     public func stop() {
-        // Speed 0 is the belt's stop command.
+        // Speed 0 is the belt's stop command (the dialect turns it into whatever its belt needs).
         send(.setSpeed(0))
     }
 
     /// Belt only accepts app speed changes in manual mode, and must be woken from standby.
     ///
     /// The three frames go in as one batch so a second call cannot interleave and reorder them.
+    /// A dialect without modes simply drops the first frame.
     public func startWalking(at kph: Double) {
         send(batch: [.setMode(.manual), .start, .setSpeed(PadController.rawSpeed(kph))])
     }
@@ -357,10 +507,12 @@ public final class PadController: NSObject, ObservableObject {
 
     private func startTimers() {
         stopTimers()
-        pollTimer = Timer.scheduledTimer(
-            withTimeInterval: PadController.statusPollInterval, repeats: true
-        ) { [weak self] _ in
-            self?.send(.askStats)
+        if dialect.pollsForStatus {
+            pollTimer = Timer.scheduledTimer(
+                withTimeInterval: PadController.statusPollInterval, repeats: true
+            ) { [weak self] _ in
+                self?.send(.askStats)
+            }
         }
         rssiTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             self?.peripheral?.readRSSI()
@@ -372,6 +524,7 @@ public final class PadController: NSObject, ObservableObject {
         rssiTimer?.invalidate(); rssiTimer = nil
         connectDeadlineTimer?.invalidate(); connectDeadlineTimer = nil
         speedConfirmTimer?.invalidate(); speedConfirmTimer = nil
+        dropHeldSpeed()
     }
 
     // MARK: - Logging
@@ -430,7 +583,7 @@ extension PadController: CBCentralManagerDelegate {
     ) {
         let advName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
         let name = peripheral.name ?? advName
-        if isBroadScanning && !looksLikeBelt(name: name) { return }
+        if isBroadScanning && !dialect.looksLikeBelt(name: name) { return }
 
         appendLog("Found \(name ?? peripheral.identifier.uuidString) (\(RSSI) dBm)", .info)
         stopScan()
@@ -444,7 +597,7 @@ extension PadController: CBCentralManagerDelegate {
 
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         appendLog("Connected, discovering services", .info)
-        peripheral.discoverServices([PadController.serviceUUID])
+        peripheral.discoverServices(dialect.serviceUUIDs)
     }
 
     public func centralManager(
@@ -460,10 +613,7 @@ extension PadController: CBCentralManagerDelegate {
     ) {
         appendLog("Belt disconnected\(error.map { ": \($0.localizedDescription)" } ?? "")", .warning)
         stopTimers()
-        self.peripheral = nil
-        writeCharacteristic = nil
-        queue.removeAll()
-        inFlightSpeedRaw = nil
+        resetConnectionArtifacts()
         if wantsConnection {
             state = .scanning
             startScan(broad: false)
@@ -485,42 +635,87 @@ extension PadController: CBPeripheralDelegate {
             abandonConnectAttempt("Service discovery failed\(error.map { ": \($0.localizedDescription)" } ?? "")")
             return
         }
+        pendingServiceDiscoveries = services.count
         for service in services {
-            peripheral.discoverCharacteristics(
-                [PadController.notifyUUID, PadController.writeUUID], for: service
-            )
+            peripheral.discoverCharacteristics(dialect.characteristicUUIDs, for: service)
         }
     }
 
     public func peripheral(
         _ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?
     ) {
-        guard error == nil, let characteristics = service.characteristics else {
-            abandonConnectAttempt("Characteristic discovery failed\(error.map { ": \($0.localizedDescription)" } ?? "")")
+        guard error == nil else {
+            abandonConnectAttempt("Characteristic discovery failed: \(error!.localizedDescription)")
             return
         }
-        for characteristic in characteristics {
-            switch characteristic.uuid {
-            case PadController.notifyUUID:
+        for characteristic in service.characteristics ?? [] {
+            characteristics[characteristic.uuid] = characteristic
+        }
+        pendingServiceDiscoveries -= 1
+        guard pendingServiceDiscoveries <= 0, !isReady else { return }
+
+        let missing = dialect.requiredCharacteristicUUIDs.filter { characteristics[$0] == nil }
+        guard missing.isEmpty else {
+            // The device has the service but not the characteristic that drives the belt, so it
+            // can never accept commands. Fail now rather than waiting out the connect budget.
+            abandonConnectAttempt(
+                "Device exposes no \(dialect.family.label) control characteristic "
+                + "(\(missing.map(\.uuidString).joined(separator: ", ")))"
+            )
+            return
+        }
+        runSetup(dialect.setupSteps, on: peripheral)
+    }
+
+    /// Walk the dialect's bring-up sequence, honouring the pauses it asks for, and declare the
+    /// link ready at the end. Cancelled wholesale if the peripheral goes away in the middle.
+    private func runSetup(_ steps: [BeltSetupStep], on peripheral: CBPeripheral) {
+        guard let step = steps.first else {
+            finishSetup(peripheral)
+            return
+        }
+        var pause: TimeInterval = 0
+        switch step {
+        case .subscribe(let uuid, let pauseAfter):
+            if let characteristic = characteristics[uuid] {
                 peripheral.setNotifyValue(true, for: characteristic)
-            case PadController.writeUUID:
-                writeCharacteristic = characteristic
-            default:
-                break
+            }
+            pause = pauseAfter
+        case .read(let uuid):
+            if let characteristic = characteristics[uuid] { peripheral.readValue(for: characteristic) }
+        case .write(let write):
+            if let characteristic = characteristics[write.characteristic] {
+                perform(write, on: peripheral, characteristic: characteristic)
+                lastSendAt = Date()
+                appendLog("TX \(write.bytes.map { String(format: "%02x", $0) }.joined(separator: " "))", .tx)
             }
         }
-        if writeCharacteristic != nil {
-            connectDeadlineTimer?.invalidate()
-            connectDeadlineTimer = nil
-            state = .connected(peripheral.name ?? "WalkingPad")
-            appendLog("Ready", .info)
-            startTimers()
-            send(.askStats)
-            send(.askHistory)
-        } else if service.uuid == PadController.serviceUUID {
-            // The belt's own service is present but has no write characteristic, so this device
-            // can never accept commands. Fail now rather than waiting out the connect budget.
-            abandonConnectAttempt("Device exposes no WalkingPad write characteristic")
+        let remaining = Array(steps.dropFirst())
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.peripheral === peripheral else { return }
+            self.runSetup(remaining, on: peripheral)
+        }
+        setupWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + pause, execute: item)
+    }
+
+    private func finishSetup(_ peripheral: CBPeripheral) {
+        setupWorkItem = nil
+        isReady = true
+        connectDeadlineTimer?.invalidate()
+        connectDeadlineTimer = nil
+        state = .connected(peripheral.name ?? "WalkingPad")
+        appendLog("Ready", .info)
+        startTimers()
+        if dialect.pollsForStatus { send(.askStats) }
+        if dialect.family.supportsStoredSession { send(.askHistory) }
+    }
+
+    public func peripheral(
+        _ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?
+    ) {
+        if let error {
+            appendLog("Could not enable notifications on \(characteristic.uuid): \(error.localizedDescription)", .warning)
         }
     }
 
@@ -529,18 +724,33 @@ extension PadController: CBPeripheralDelegate {
     ) {
         guard let data = characteristic.value else { return }
         let bytes = [UInt8](data)
-        switch PadFrame(data: bytes) {
+        for event in dialect.decode(characteristic: characteristic.uuid, bytes: bytes, now: Date()) {
+            handle(event)
+        }
+    }
+
+    private func handle(_ event: BeltEvent) {
+        switch event {
         case .status(let s):
             status = s
-            if let want = inFlightSpeedRaw, s.speedRaw == want {
-                inFlightSpeedRaw = nil
-                speedConfirmTimer?.invalidate()
-                speedConfirmTimer = nil
-            }
+            if let want = inFlightSpeedRaw, s.speedRaw == want { clearInFlightSpeed() }
+            releaseHeldSpeedIfMoving(s)
             onStatus?(s)
         case .record(let r):
             lastRecord = r
             appendLog("Stored session: \(r.steps) steps, \(String(format: "%.2f", r.distanceKm)) km", .info)
+        case .speedAccepted(let raw):
+            if inFlightSpeedRaw == raw { clearInFlightSpeed() }
+        case .speedCommandAccepted:
+            // The belt took the speed. If nothing newer is queued or held, that is the one we
+            // are waiting on; the instantaneous speed will catch up as the motor ramps.
+            let newerPending = heldSpeedRaw != nil
+                || queue.pendingControl.contains { if case .setSpeed = $0 { return true }; return false }
+            if !newerPending { clearInFlightSpeed() }
+        case .speedRange(let range):
+            beltSpeedRange = range
+        case .note(let text, let isWarning):
+            appendLog(text, isWarning ? .warning : .info)
         case .unknown(let bytes):
             appendLog("RX \(bytes.map { String(format: "%02x", $0) }.joined(separator: " "))", .rx)
         }

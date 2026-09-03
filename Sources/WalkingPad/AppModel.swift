@@ -23,6 +23,9 @@ enum MenuBarReadout: String, CaseIterable, Identifiable {
 }
 
 struct AppSettings: Equatable {
+    /// Which generation of belt to look for. Remembered, because a belt of the other family is
+    /// invisible to the scan and "No belt found" is all the user would ever see.
+    var padFamily: PadFamily = .default
     var unit: DistanceUnit = .kilometers
     /// Everyday walking ceiling for the slider, presets and programs. Independent of the belt's
     /// own max-speed setting.
@@ -137,6 +140,10 @@ final class AppModel: ObservableObject {
             recorder.profile = newValue.profile
             if newValue.hideDockIcon != oldValue.hideDockIcon {
                 applyDockIconPolicy(hidden: newValue.hideDockIcon)
+            }
+            // The controller reconnects with the new protocol by itself.
+            if newValue.padFamily != oldValue.padFamily {
+                controller.family = newValue.padFamily
             }
             // A Slider whose value sits outside its own range misbehaves, so follow the ceiling down.
             let ceiling = SpeedLimits.effectiveCeiling(
@@ -266,7 +273,18 @@ final class AppModel: ObservableObject {
 
         applyDockIconPolicy(hidden: loaded.hideDockIcon)
 
+        controller.family = loaded.padFamily
         if settings.autoConnectOnLaunch { controller.connect() }
+    }
+
+    /// The belt family in force — what the scan is looking for.
+    var padFamily: PadFamily { settings.padFamily }
+
+    func setPadFamily(_ family: PadFamily) {
+        guard settings.padFamily != family else { return }
+        var updated = settings
+        updated.padFamily = family
+        settings = updated
     }
 
     // MARK: - Derived view state
@@ -285,7 +303,8 @@ final class AppModel: ObservableObject {
 
     var effectiveMaxSpeed: Double {
         SpeedLimits.effectiveCeiling(
-            walkingCeilingKph: settings.speedCeilingKph, isRunningMode: settings.isRunningMode
+            walkingCeilingKph: settings.speedCeilingKph, isRunningMode: settings.isRunningMode,
+            beltMaxKph: controller.beltSpeedRange?.maxKph
         )
     }
 
@@ -379,7 +398,11 @@ final class AppModel: ObservableObject {
 
     private func clamp(_ kph: Double) -> Double {
         let rounded = (kph * 10).rounded() / 10
-        return min(max(0, rounded), effectiveMaxSpeed)
+        let ceiling = effectiveMaxSpeed
+        // A belt that states its minimum (FTMS) refuses anything slower, so lift to it.
+        return SpeedLimits.liftedToBeltMinimum(
+            min(max(0, rounded), ceiling), beltMinKph: controller.beltSpeedRange?.minKph, ceilingKph: ceiling
+        )
     }
 
     /// Switching to `.accessory` drops the Dock icon so the app lives only in the menu bar.
@@ -879,6 +902,7 @@ final class AppModel: ObservableObject {
     // MARK: - Persistence
 
     private func persist() {
+        defaults.set(settings.padFamily.rawValue, forKey: Keys.padFamily)
         defaults.set(settings.unit.rawValue, forKey: Keys.unit)
         defaults.set(settings.speedCeilingKph, forKey: Keys.ceiling)
         defaults.set(settings.isRunningMode, forKey: Keys.runningMode)
@@ -926,6 +950,9 @@ final class AppModel: ObservableObject {
 
     private static func load(from defaults: UserDefaults) -> AppSettings {
         var settings = AppSettings()
+        if let raw = defaults.string(forKey: Keys.padFamily), let family = PadFamily(rawValue: raw) {
+            settings.padFamily = family
+        }
         if let raw = defaults.string(forKey: Keys.unit), let unit = DistanceUnit(rawValue: raw) {
             settings.unit = unit
         }
@@ -996,6 +1023,7 @@ final class AppModel: ObservableObject {
     }
 
     private enum Keys {
+        static let padFamily = "padFamily"
         static let unit = "unit"
         static let ceiling = "speedCeilingKph"
         static let runningMode = "isRunningMode"

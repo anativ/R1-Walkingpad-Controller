@@ -1,8 +1,8 @@
 # WalkingPad for macOS
 
-A native macOS app to monitor and control a KingSmith WalkingPad treadmill (R1 Pro, and the
-A1/C1/P1 family — they all speak the same Bluetooth protocol) over BLE. No dependencies, no
-vendor account, no phone required.
+A native macOS app to monitor and control a KingSmith WalkingPad treadmill over BLE — the
+R1 Pro and the A1/C1/P1 family (KingSmith's original protocol), and the Z1 / Z1F (the standard
+Fitness Machine protocol). No dependencies, no vendor account, no phone required.
 
 ![built with SwiftUI + CoreBluetooth](https://img.shields.io/badge/SwiftUI-CoreBluetooth-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -27,6 +27,23 @@ the internet.
 Or from Terminal: `xattr -cr WalkingPad.app && open WalkingPad.app`
 
 To compile it yourself instead, see [Build and run](#build-and-run).
+
+## Which belt
+
+Pick your model once in **Settings › General › Belt model**; the choice is remembered.
+
+| Choose | For | Bluetooth name | Protocol |
+| --- | --- | --- | --- |
+| **R1 Pro · A1 · C1 · P1** (default) | R1 Pro, A1, A1 Pro, C1, C2, P1, X21 | `WalkingPad`, `KS-R1…`, `KS-X21…` | KingSmith "WiLink", service `FE00` |
+| **Z1 · Z1F** | Z1, Z1F (model WP400F4) and other 2025+ belts | `KS-HD-…` | Fitness Machine Service, `1826` |
+
+A belt of one family is invisible to a scan for the other, so if the app says "No belt found"
+the hint under it names the family it was looking for. Changing the model reconnects at once.
+
+On a Z1 / Z1F everything on the dashboard works — speed, start/stop, time, distance, steps,
+programs, history, menu bar — but the belt-side settings tab, the mode buttons and the "belt's
+stored session" card are hidden, because that protocol has no such commands. The belt reports its
+own speed range (1–6 km/h on the Z1F) and the app's slider and presets stop where the belt does.
 
 ## What it shows
 
@@ -332,7 +349,8 @@ Because the app is ad-hoc signed, its signature changes on every rebuild, so mac
 again after you rebuild. Grant it under System Settings › Privacy & Security › Bluetooth.
 
 Turn the belt on and put it in standby (not off) before connecting. The app scans for the
-WalkingPad BLE service, and falls back to matching on device name after a few seconds.
+service of the belt model chosen in Settings, and falls back to matching on device name after a
+few seconds.
 
 ## Troubleshooting with padctl
 
@@ -343,6 +361,7 @@ WalkingPad BLE service, and falls back to matching on device name after a few se
 ./dist/padctl watch         # connect and stream live status frames
 ./dist/padctl speed 3.0     # start the belt at 3.0 km/h
 ./dist/padctl stop          # stop the belt
+./dist/padctl --z1 watch    # the same, for a Z1 / Z1F (also: --model z1)
 ```
 
 `selftest` runs anywhere. The hardware commands need Bluetooth permission, which macOS grants
@@ -355,6 +374,14 @@ macOS refuses Bluetooth to a bare executable even when the usage description is 
 `__TEXT,__info_plist` section, so the tool has to be the main executable of a real bundle.
 
 ## How it works
+
+Everything protocol-specific sits behind a small "dialect" interface in
+`Sources/WalkingPadKit/BLE/BeltDialect.swift`: which service to scan for, which characteristics to
+subscribe to and in what order, how a command becomes bytes, how a notification becomes a status.
+The controller above it only scans, connects, keeps deadlines and paces the command queue. There
+are two dialects.
+
+### R1 Pro / A1 / C1 / P1 — the classic protocol
 
 The belt exposes a BLE service `FE00` with notify `FE01` and write `FE02`. Frames are
 `F7 <cmd> <payload…> <crc> FD`, where the CRC is the low byte of the sum of everything
@@ -380,6 +407,35 @@ Two behaviours worth knowing, both handled by the app:
 - **Speed changes only apply in manual mode on a running belt.** Setting a speed while stopped
   transparently sends mode → start → speed.
 
+### Z1 / Z1F — the Fitness Machine Service
+
+The Z1 generation drops the vendor service for the Bluetooth SIG Fitness Machine Service
+(`1826`), which the KS Fit app also speaks. Commands go to the Control Point (`2AD9`) and are
+answered with a result code; live data arrives unprompted on Treadmill Data (`2ACD`).
+
+| Command | Bytes |
+| --- | --- |
+| Request control | `00` |
+| Set target speed (0.01 km/h, little-endian) | `02 <lo> <hi>` |
+| Start or resume | `07` |
+| Stop | `08 01` |
+
+Treadmill Data is a flags word followed by the optional fields the flags announce, in spec
+order: instantaneous speed (0.01 km/h), total distance in metres, elapsed seconds, and — flag
+bit 13, a KingSmith extension — a step count. Speeds are converted to the app's 0.1 km/h grid
+by integer arithmetic so a program stepping by 0.1 cannot drift. Three quirks of the firmware,
+all handled:
+
+- **Notification enables that land within ~30 ms of each other are dropped**, so the
+  subscriptions are staggered 100 / 200 / 300 ms apart, the way the vendor app does it.
+- **A speed target written while the motor is spinning up crashes the link**, so on a start
+  the speed is held until the belt reports movement, then for two more seconds, then sent.
+- **Request control is often refused** with "operation failed", yet the commands that follow
+  are honoured. The refusal is logged and ignored.
+
+The belt also reports its supported speed range (`2AD4`), which the app treats as a hard limit
+on top of its own ceiling.
+
 ## Layout
 
 ```
@@ -404,9 +460,12 @@ speed you are not ready to walk at, and keep the belt's own remote within reach.
 
 ## Credit
 
-The BLE protocol was reverse engineered by
-[ph4r05/ph4-walkingpad](https://github.com/ph4r05/ph4-walkingpad); this app is an independent
-native Swift implementation of it. Not affiliated with KingSmith.
+The classic protocol was reverse engineered by
+[ph4r05/ph4-walkingpad](https://github.com/ph4r05/ph4-walkingpad). The Z1 generation's FTMS
+details — the step-count extension, the subscription stagger, the spin-up hazard — come from
+[mcdax/walkingpad-controller](https://github.com/mcdax/walkingpad-controller)'s analysis of the
+KS Fit app. This app is an independent native Swift implementation of both. Not affiliated with
+KingSmith.
 
 ## License
 
