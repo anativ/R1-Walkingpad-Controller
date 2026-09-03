@@ -37,12 +37,14 @@ public enum SpeedLimits {
         return min(ceiling, beltMaxKph)
     }
 
-    /// Lift a non-zero request to the belt's own minimum, where it reports one.
+    /// The speed below which a request is treated as a stop.
     ///
-    /// Below its minimum the belt refuses the speed outright; 0 stays 0 because it means stop.
-    public static func liftedToBeltMinimum(_ kph: Double, beltMinKph: Double?, ceilingKph: Double) -> Double {
-        guard kph > 0, let beltMinKph, beltMinKph.isFinite, beltMinKph > 0 else { return kph }
-        return min(max(kph, beltMinKph), ceilingKph)
+    /// The belt refuses anything under its minimum and never confirms it, so the UI would wait
+    /// forever. Stopping is the honest reading of "slower than the belt can go". The request is
+    /// never lifted *up* to the minimum: this must not command a faster speed than was asked for.
+    public static func stopThreshold(beltMinKph: Double?) -> Double {
+        guard let beltMinKph, beltMinKph.isFinite, beltMinKph > 0 else { return minRunningKph }
+        return max(minRunningKph, beltMinKph)
     }
 
     /// Whether the app must itself command a lower speed after the ceiling changed.

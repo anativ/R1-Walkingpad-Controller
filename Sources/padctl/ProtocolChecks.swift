@@ -1799,7 +1799,8 @@ func beltFamilyIsRememberedAndExplained() throws {
 }
 
 /// An FTMS belt states its own range, and refuses speeds outside it. The app's ceiling stops
-/// where the belt does, and a slow request is lifted to the belt's minimum — but 0 stays a stop.
+/// where the belt does, and a request slower than the belt can go becomes a stop — never a
+/// faster speed than was asked for.
 func beltReportedRangeTightensTheCeiling() throws {
     // Z1F: 1.0–6.0 km/h. Run mode would otherwise offer 10.
     check(SpeedLimits.effectiveCeiling(walkingCeilingKph: 6, isRunningMode: true, beltMaxKph: 6.0) == 6.0)
@@ -1811,10 +1812,21 @@ func beltReportedRangeTightensTheCeiling() throws {
           "a nonsense range is ignored, not obeyed")
     check(SpeedLimits.effectiveCeiling(walkingCeilingKph: 6, isRunningMode: true, beltMaxKph: .nan) == 10.0)
 
-    check(SpeedLimits.liftedToBeltMinimum(0.6, beltMinKph: 1.0, ceilingKph: 6) == 1.0)
-    check(SpeedLimits.liftedToBeltMinimum(3.0, beltMinKph: 1.0, ceilingKph: 6) == 3.0)
-    check(SpeedLimits.liftedToBeltMinimum(0, beltMinKph: 1.0, ceilingKph: 6) == 0, "zero means stop")
-    check(SpeedLimits.liftedToBeltMinimum(0.6, beltMinKph: nil, ceilingKph: 6) == 0.6)
-    check(SpeedLimits.liftedToBeltMinimum(0.6, beltMinKph: 8, ceilingKph: 6) == 6,
-          "the minimum can never push past the ceiling")
+    check(SpeedLimits.stopThreshold(beltMinKph: nil) == SpeedLimits.minRunningKph)
+    check(SpeedLimits.stopThreshold(beltMinKph: 1.0) == 1.0, "0.6 km/h on a Z1F is a stop, not 1.0")
+    check(SpeedLimits.stopThreshold(beltMinKph: 0.2) == SpeedLimits.minRunningKph,
+          "a belt minimum below the app's own never lowers the threshold")
+    check(SpeedLimits.stopThreshold(beltMinKph: .infinity) == SpeedLimits.minRunningKph)
+}
+
+/// The last clamp happens at the wire, so a speed that waited in the queue or for the motor
+/// while the ceiling dropped underneath it still goes out under the new limit.
+func wireClampAppliesEveryLimitAndOnlyLowers() throws {
+    check(PadController.wireSpeed(50, ceilingRaw: 30, beltMaxKph: nil) == 30, "ceiling lowered to 3.0 while 5.0 waited")
+    check(PadController.wireSpeed(25, ceilingRaw: 30, beltMaxKph: nil) == 25, "never raised")
+    check(PadController.wireSpeed(80, ceilingRaw: 100, beltMaxKph: 6.0) == 60, "the belt's own maximum caps run mode")
+    check(PadController.wireSpeed(80, ceilingRaw: 100, beltMaxKph: nil) == 80)
+    check(PadController.wireSpeed(255, ceilingRaw: 255, beltMaxKph: nil) == 100, "the hard maximum is the last word")
+    check(PadController.wireSpeed(50, ceilingRaw: 60, beltMaxKph: 0) == 50, "a nonsense belt range is ignored")
+    check(PadController.wireSpeed(0, ceilingRaw: 30, beltMaxKph: 6) == 0, "stop is always allowed")
 }

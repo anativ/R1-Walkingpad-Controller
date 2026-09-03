@@ -106,6 +106,17 @@ public final class PadController: NSObject, ObservableObject {
     @Published public private(set) var inFlightSpeedRaw: UInt8?
     /// Speed limits the belt itself reported, where the protocol offers them.
     @Published public private(set) var beltSpeedRange: FTMS.SpeedRange?
+    /// The last speed written to the belt that it has not yet been seen running at. Unlike
+    /// `inFlightSpeedRaw` this survives the belt's acknowledgement: an FTMS belt accepts a target
+    /// at once and then ramps to it for several seconds, and a ceiling lowered during the ramp has
+    /// to know where the belt is heading, not where it is.
+    @Published public private(set) var targetSpeedRaw: UInt8?
+    /// The app's speed ceiling in 0.1 km/h, applied once more at the wire.
+    ///
+    /// The app clamps before it asks, but a speed can wait in the queue, or be held for the
+    /// motor, while the ceiling drops underneath it. Clamping at the last moment before the write
+    /// is invariant 6; this is where that happens.
+    public var speedCeilingRaw: UInt8 = UInt8(PadController.maxSafeSpeedKph * 10)
 
     /// Which generation of belt to look for. Changing it mid-connection starts over with the new
     /// protocol — a belt of one family is invisible to the other's scan.
@@ -313,8 +324,12 @@ public final class PadController: NSObject, ObservableObject {
         setupWorkItem = nil
         queue.removeAll()
         inFlightSpeedRaw = nil
+        targetSpeedRaw = nil
         dropHeldSpeed()
         beltSpeedRange = nil
+        // A status from the previous connection must not vouch for the belt moving now: the
+        // spin-up hold (invariant 8) reads it, and a stale "running" would let a speed through.
+        status = nil
         speedConfirmTimer?.invalidate()
         speedConfirmTimer = nil
         heldSpeedTimer?.invalidate()
@@ -419,12 +434,26 @@ public final class PadController: NSObject, ObservableObject {
             dropHeldSpeed()
         }
 
-        guard let write = dialect.encode(command),
+        var outgoing = command
+        if case .setSpeed(let raw) = command {
+            // The last clamp before the wire. The app already clamped when it asked, but the
+            // ceiling may have dropped while this speed sat in the queue or waited for the motor.
+            let limited = PadController.wireSpeed(raw, ceilingRaw: speedCeilingRaw, beltMaxKph: beltSpeedRange?.maxKph)
+            if limited != raw {
+                appendLog(String(format: "Clamped %.1f km/h to the %.1f km/h limit at the wire",
+                                 Double(raw) / 10, Double(limited) / 10), .warning)
+                outgoing = .setSpeed(limited)
+                if inFlightSpeedRaw == raw { inFlightSpeedRaw = limited }
+            }
+            targetSpeedRaw = limited > 0 ? limited : nil
+        }
+
+        guard let write = dialect.encode(outgoing),
               let characteristic = characteristics[write.characteristic] else { return }
         perform(write, on: peripheral, characteristic: characteristic)
         lastSendAt = Date()
-        if case .setSpeed = command { armSpeedConfirmDeadline() }
-        if !command.isStatusPoll {
+        if case .setSpeed = outgoing { armSpeedConfirmDeadline() }
+        if !outgoing.isStatusPoll {
             appendLog("TX \(write.bytes.map { String(format: "%02x", $0) }.joined(separator: " "))", .tx)
         }
     }
@@ -445,6 +474,16 @@ public final class PadController: NSObject, ObservableObject {
             guard let self, let held = self.heldSpeedRaw else { return }
             self.heldSpeedRelease = nil
             self.heldSpeedRaw = nil
+            // The belt may have stopped again during the settle — the safety key, most likely.
+            // A speed target must then not go out; the user can start again deliberately.
+            guard self.status?.isMoving == true else {
+                self.inFlightSpeedRaw = nil
+                self.appendLog(
+                    "Belt stopped before \(String(format: "%.1f", Double(held) / 10)) km/h could be sent — not sending it",
+                    .warning
+                )
+                return
+            }
             self.queue.enqueue(.setSpeed(held))
             self.scheduleDrain()
         }
@@ -476,6 +515,16 @@ public final class PadController: NSObject, ObservableObject {
     public static func rawSpeed(_ kph: Double) -> UInt8 {
         let safe = min(max(0, kph), maxSafeSpeedKph)
         return UInt8(max(0, min(255, (safe * 10).rounded())))
+    }
+
+    /// The speed that may actually be written: the request, capped by the app's ceiling, the
+    /// hard maximum, and the belt's own reported maximum where it gave one. Only ever lower.
+    public static func wireSpeed(_ raw: UInt8, ceilingRaw: UInt8, beltMaxKph: Double?) -> UInt8 {
+        var limit = min(ceilingRaw, rawSpeed(maxSafeSpeedKph))
+        if let beltMaxKph, beltMaxKph.isFinite, beltMaxKph >= SpeedLimits.minRunningKph {
+            limit = min(limit, rawSpeed(beltMaxKph))
+        }
+        return min(raw, limit)
     }
 
     public func stop() {
@@ -734,6 +783,10 @@ extension PadController: CBPeripheralDelegate {
         case .status(let s):
             status = s
             if let want = inFlightSpeedRaw, s.speedRaw == want { clearInFlightSpeed() }
+            if let target = targetSpeedRaw, s.speedRaw == target || !s.isMoving && target > 0 && heldSpeedRaw == nil && inFlightSpeedRaw == nil {
+                // Reached it, or the belt stopped on its own with nothing further pending.
+                targetSpeedRaw = nil
+            }
             releaseHeldSpeedIfMoving(s)
             onStatus?(s)
         case .record(let r):

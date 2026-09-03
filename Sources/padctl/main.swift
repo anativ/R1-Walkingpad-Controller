@@ -83,6 +83,7 @@ let allChecks: [(String, () throws -> Void)] = [
     ("ftms setup is staggered, ends with request control", ftmsSetupIsStaggeredAndEndsWithRequestControl),
     ("belt family is remembered and explained", beltFamilyIsRememberedAndExplained),
     ("belt-reported range tightens the ceiling", beltReportedRangeTightensTheCeiling),
+    ("wire clamp applies every limit and only lowers", wireClampAppliesEveryLimitAndOnlyLowers),
 ]
 
 func usage() -> Never {

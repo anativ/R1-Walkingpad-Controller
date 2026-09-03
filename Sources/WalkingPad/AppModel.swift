@@ -150,6 +150,9 @@ final class AppModel: ObservableObject {
                 walkingCeilingKph: newValue.speedCeilingKph, isRunningMode: newValue.isRunningMode
             )
             if desiredSpeedKph > ceiling { desiredSpeedKph = ceiling }
+            // The controller applies the ceiling again at the wire, so a speed already queued or
+            // held for the motor (see invariant 8) cannot slip out above the new limit.
+            controller.speedCeilingRaw = PadController.rawSpeed(ceiling)
 
             // A running program adopts the new band first, and reports whether it is still driving.
             let programStillDriving = runner.applyCeiling(SpeedProgram.raw(ceiling))
@@ -274,6 +277,7 @@ final class AppModel: ObservableObject {
         applyDockIconPolicy(hidden: loaded.hideDockIcon)
 
         controller.family = loaded.padFamily
+        controller.speedCeilingRaw = PadController.rawSpeed(effectiveMaxSpeed)
         if settings.autoConnectOnLaunch { controller.connect() }
     }
 
@@ -359,9 +363,10 @@ final class AppModel: ObservableObject {
         // Taking the speed by hand means you have taken over from the program.
         if runner.isRunning { runner.stop(reason: "manual speed change") }
         let speed = clamp(kph)
-        if speed < AppSettings.minRunningSpeedKph {
+        if speed < SpeedLimits.stopThreshold(beltMinKph: controller.beltSpeedRange?.minKph) {
             // The belt cannot run this slowly and ignores such a request outright, which would
             // leave the UI waiting for a confirmation that never comes. Treat it as a stop.
+            // (A belt that states its minimum, like the Z1F's 1.0 km/h, raises the threshold.)
             desiredSpeedKph = 0
             controller.stop()
             return
@@ -398,11 +403,7 @@ final class AppModel: ObservableObject {
 
     private func clamp(_ kph: Double) -> Double {
         let rounded = (kph * 10).rounded() / 10
-        let ceiling = effectiveMaxSpeed
-        // A belt that states its minimum (FTMS) refuses anything slower, so lift to it.
-        return SpeedLimits.liftedToBeltMinimum(
-            min(max(0, rounded), ceiling), beltMinKph: controller.beltSpeedRange?.minKph, ceilingKph: ceiling
-        )
+        return min(max(0, rounded), effectiveMaxSpeed)
     }
 
     /// Switching to `.accessory` drops the Dock icon so the app lives only in the menu bar.
@@ -490,7 +491,10 @@ final class AppModel: ObservableObject {
     /// alone would let a faster in-flight command slip under a ceiling change.
     var commandedSpeedKph: Double {
         let inFlight = controller.inFlightSpeedRaw.map { Double($0) / 10 } ?? 0
-        return max(beltSpeedKph, inFlight)
+        // An FTMS belt acknowledges a target well before it reaches it, which clears the in-flight
+        // speed while the motor is still ramping. The target it is ramping to counts too.
+        let target = controller.targetSpeedRaw.map { Double($0) / 10 } ?? 0
+        return max(beltSpeedKph, inFlight, target)
     }
 
     /// Speed to quote in the prompt: the belt's own, or the one it is still being told to run at.
