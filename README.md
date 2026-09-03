@@ -15,7 +15,10 @@ Fitness Machine protocol). No dependencies, no vendor account, no phone required
 ## Download
 
 [**WalkingPad.zip**](https://github.com/anativ/R1-Walkingpad-Controller/releases/latest/download/WalkingPad.zip)
-— universal macOS 14+ app (Apple Silicon and Intel), rebuilt by CI on every push to `main`.
+— universal macOS 14+ app (Apple Silicon and Intel), the newest numbered release. A rolling
+build of the latest commit on `main` is also published under the
+[`latest` tag](https://github.com/anativ/R1-Walkingpad-Controller/releases/tag/latest), marked as
+a pre-release.
 
 The build is ad-hoc signed (no Apple Developer ID), so Gatekeeper blocks a double-click from
 the internet.

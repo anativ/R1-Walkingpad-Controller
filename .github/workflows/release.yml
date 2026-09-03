@@ -49,13 +49,19 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           tag: latest
-          name: Latest
+          name: Rolling build (main)
           artifacts: dist/WalkingPad.zip,dist/WalkingPad.zip.sha256
           allowUpdates: true
           replacesArtifacts: true
-          makeLatest: true
+          # The "Latest" badge belongs to the newest version tag, not to whatever main last
+          # built: a main push landing after a tag used to steal the badge from the release
+          # people were told to download.
+          makeLatest: false
+          prerelease: true
           body: |
-            Universal macOS 14+ build of `WalkingPad.app` from ${{ github.sha }}.
+            Rolling universal macOS 14+ build of `WalkingPad.app` from ${{ github.sha }} — the
+            newest commit on `main`, ahead of the last numbered release. For the current
+            numbered release use the one marked **Latest**.
 
             ## Install
 

@@ -41,6 +41,15 @@ for local builds.
 - Universal (`arm64` + `x86_64`) is the right default for a download: GitHub's runner is
   Apple Silicon, but Intel Macs on macOS 14 still exist.
 
+## Amendment (2026-09-03)
+
+Decision 2 assumed the rolling `latest` release would carry GitHub's "Latest" badge. Once
+numbered tags existed, a `main` push finishing after a tag build stole the badge back from the
+numbered release, so `/releases/latest` pointed at whichever job ran last. The rolling release is
+now published as a pre-release without the badge; numbered `v*` releases own it, and
+`/releases/latest/download/WalkingPad.zip` resolves to the newest numbered version. The rolling
+build is still there under the `latest` tag for anyone who wants the tip of `main`.
+
 ## Consequences
 
 - First launch from a download always hits Gatekeeper. The README has to say so, or the
