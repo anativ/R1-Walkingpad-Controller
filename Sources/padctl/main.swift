@@ -84,6 +84,7 @@ let allChecks: [(String, () throws -> Void)] = [
     ("belt family is remembered and explained", beltFamilyIsRememberedAndExplained),
     ("belt-reported range tightens the ceiling", beltReportedRangeTightensTheCeiling),
     ("wire clamp applies every limit and only lowers", wireClampAppliesEveryLimitAndOnlyLowers),
+    ("ftms handshakes on the supplement service before control", ftmsHandshakesOnTheSupplementServiceBeforeControl),
 ]
 
 func usage() -> Never {

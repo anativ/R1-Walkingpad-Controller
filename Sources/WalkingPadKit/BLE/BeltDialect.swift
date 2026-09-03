@@ -58,6 +58,8 @@ public protocol BeltDialect: AnyObject {
 
     /// The write that realises a command, or nil when this belt has no such command.
     func encode(_ command: PadCommand) -> BeltWrite?
+    /// A vendor frame to write immediately before a command, where the firmware wants one.
+    func preamble(for command: PadCommand) -> BeltWrite?
     /// Translate a notification or read result.
     func decode(characteristic: CBUUID, bytes: [UInt8], now: Date) -> [BeltEvent]
     /// Forget per-connection decoder state.
@@ -65,6 +67,8 @@ public protocol BeltDialect: AnyObject {
 }
 
 public extension BeltDialect {
+    func preamble(for command: PadCommand) -> BeltWrite? { nil }
+
     /// Whether a name seen during a broad scan is plausibly this family of belt.
     func looksLikeBelt(name: String?) -> Bool {
         guard let name = name?.lowercased() else { return false }
@@ -136,6 +140,10 @@ public final class FTMSDialect: BeltDialect {
     public static let speedRangeUUID = CBUUID(string: String(format: "%04X", FTMS.supportedSpeedRangeUUID16))
     public static let controlPointUUID = CBUUID(string: String(format: "%04X", FTMS.controlPointUUID16))
     public static let machineStatusUUID = CBUUID(string: String(format: "%04X", FTMS.machineStatusUUID16))
+    /// KingSmith's vendor "supplement" service on `KS-HD-*` belts (Z1, Z1F).
+    public static let supplementServiceUUID = CBUUID(string: FTMS.Supplement.serviceUUID)
+    public static let supplementNotifyUUID = CBUUID(string: FTMS.Supplement.notifyUUID)
+    public static let supplementWriteUUID = CBUUID(string: FTMS.Supplement.writeUUID)
 
     private var assembler = FTMS.StatusAssembler()
     /// The firmware replays its last event the moment notifications are enabled — usually a
@@ -146,10 +154,11 @@ public final class FTMSDialect: BeltDialect {
 
     public var family: PadFamily { .ftms }
     public var scanServiceUUIDs: [CBUUID] { [FTMSDialect.serviceUUID] }
-    public var serviceUUIDs: [CBUUID] { [FTMSDialect.serviceUUID] }
+    public var serviceUUIDs: [CBUUID] { [FTMSDialect.serviceUUID, FTMSDialect.supplementServiceUUID] }
     public var characteristicUUIDs: [CBUUID] {
         [FTMSDialect.treadmillDataUUID, FTMSDialect.speedRangeUUID,
-         FTMSDialect.controlPointUUID, FTMSDialect.machineStatusUUID]
+         FTMSDialect.controlPointUUID, FTMSDialect.machineStatusUUID,
+         FTMSDialect.supplementNotifyUUID, FTMSDialect.supplementWriteUUID]
     }
     public var requiredCharacteristicUUIDs: [CBUUID] {
         [FTMSDialect.controlPointUUID, FTMSDialect.treadmillDataUUID]
@@ -164,14 +173,35 @@ public final class FTMSDialect: BeltDialect {
     /// so the subscriptions are staggered the way the vendor app does it (100 / 200 / 300 ms).
     /// Control is then requested once; some firmware rejects the request yet honours the
     /// commands that follow, so the reply is logged but not acted on.
+    ///
+    /// On `KS-HD-*` belts the vendor app also asks the supplement service for the belt's property
+    /// list before it touches the Control Point, and the firmware treats that as the handshake
+    /// that unlocks control: a Z1F never answers a Control Point command without it. Steps whose
+    /// characteristic the belt lacks are skipped by the controller, so this is harmless elsewhere.
     public var setupSteps: [BeltSetupStep] {
         [
             .subscribe(FTMSDialect.treadmillDataUUID, pauseAfter: 0.1),
             .subscribe(FTMSDialect.machineStatusUUID, pauseAfter: 0.2),
             .subscribe(FTMSDialect.controlPointUUID, pauseAfter: 0.3),
+            .subscribe(FTMSDialect.supplementNotifyUUID, pauseAfter: 0.3),
             .read(FTMSDialect.speedRangeUUID),
+            .write(FTMSDialect.handshake),
             .write(BeltWrite(characteristic: FTMSDialect.controlPointUUID, bytes: FTMS.requestControlBytes)),
         ]
+    }
+
+    /// The property-list request the vendor app sends before every Control Point command.
+    public static let handshake = BeltWrite(
+        characteristic: FTMSDialect.supplementWriteUUID, bytes: FTMS.Supplement.propertyListBytes
+    )
+
+    /// Re-sent before each command, exactly as the vendor app does. Whether once at connect
+    /// would suffice is unknown; matching the app is the conservative choice.
+    public func preamble(for command: PadCommand) -> BeltWrite? {
+        switch command {
+        case .start, .setSpeed: return FTMSDialect.handshake
+        default: return nil
+        }
     }
 
     public func encode(_ command: PadCommand) -> BeltWrite? {
@@ -224,6 +254,12 @@ public final class FTMSDialect: BeltDialect {
         case FTMSDialect.speedRangeUUID:
             guard let range = FTMS.SpeedRange(bytes: bytes) else { return [.unknown(bytes)] }
             return [.speedRange(range), .note(range.description, isWarning: false)]
+
+        case FTMSDialect.supplementNotifyUUID:
+            // Not decoded yet — but every reply lands in the log, which is how the handshake
+            // gets understood once a real belt has answered it.
+            return [.note("Supplement reply: " + bytes.map { String(format: "%02x", $0) }.joined(separator: " "),
+                          isWarning: false)]
 
         default:
             return [.unknown(bytes)]

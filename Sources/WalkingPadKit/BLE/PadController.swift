@@ -455,6 +455,10 @@ public final class PadController: NSObject, ObservableObject {
 
         guard let write = dialect.encode(outgoing),
               let characteristic = characteristics[write.characteristic] else { return }
+        if let preamble = dialect.preamble(for: outgoing),
+           let preambleCharacteristic = characteristics[preamble.characteristic] {
+            perform(preamble, on: peripheral, characteristic: preambleCharacteristic)
+        }
         perform(write, on: peripheral, characteristic: characteristic)
         lastSendAt = Date()
         if case .setSpeed = outgoing { armSpeedConfirmDeadline() }
@@ -811,6 +815,10 @@ extension PadController: CBPeripheralDelegate {
     private func handle(_ event: BeltEvent) {
         switch event {
         case .status(let s):
+            if status == nil {
+                // One line per connection proving data flows, and what the first frame looked like.
+                appendLog("First status frame: \(s.hexDump)", .rx)
+            }
             status = s
             if let want = inFlightSpeedRaw, s.speedRaw == want { clearInFlightSpeed() }
             if let target = targetSpeedRaw, s.speedRaw == target || !s.isMoving && target > 0 && heldSpeedRaw == nil && inFlightSpeedRaw == nil {

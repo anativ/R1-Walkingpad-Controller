@@ -1754,7 +1754,8 @@ func ftmsSetupIsStaggeredAndEndsWithRequestControl() throws {
             lastPause = pause
         }
     }
-    check(subscribed == [FTMSDialect.treadmillDataUUID, FTMSDialect.machineStatusUUID, FTMSDialect.controlPointUUID])
+    check(subscribed == [FTMSDialect.treadmillDataUUID, FTMSDialect.machineStatusUUID,
+                         FTMSDialect.controlPointUUID, FTMSDialect.supplementNotifyUUID])
     check(steps.contains(.read(FTMSDialect.speedRangeUUID)))
     check(steps.last == .write(BeltWrite(characteristic: FTMSDialect.controlPointUUID, bytes: [0x00])),
           "control is requested once everything is subscribed")
@@ -1829,4 +1830,36 @@ func wireClampAppliesEveryLimitAndOnlyLowers() throws {
     check(PadController.wireSpeed(255, ceilingRaw: 255, beltMaxKph: nil) == 100, "the hard maximum is the last word")
     check(PadController.wireSpeed(50, ceilingRaw: 60, beltMaxKph: 0) == 50, "a nonsense belt range is ignored")
     check(PadController.wireSpeed(0, ceilingRaw: 30, beltMaxKph: 6) == 0, "stop is always allowed")
+}
+
+/// A Z1F refuses every Control Point command until the vendor "supplement" service has been asked
+/// for the belt's property list — the KS Fit app does it before each command. So does the dialect.
+func ftmsHandshakesOnTheSupplementServiceBeforeControl() throws {
+    let z1 = FTMSDialect()
+    check(FTMS.Supplement.propertyListBytes == [0x01, 0x00, 0x0D, 0x00, 0x06, 0x0B, 0x0F, 0x0D],
+          "the on-wire frame captured from the vendor app")
+    check(z1.serviceUUIDs.contains(FTMSDialect.supplementServiceUUID), "the supplement service is discovered")
+    check(z1.characteristicUUIDs.contains(FTMSDialect.supplementWriteUUID))
+    check(z1.characteristicUUIDs.contains(FTMSDialect.supplementNotifyUUID))
+    check(!z1.requiredCharacteristicUUIDs.contains(FTMSDialect.supplementWriteUUID),
+          "a belt without the vendor service must still connect")
+
+    // Setup: the handshake goes out after the subscriptions and before request-control.
+    let steps = z1.setupSteps
+    let handshakeIndex = try require(steps.firstIndex(of: .write(FTMSDialect.handshake)))
+    let controlIndex = try require(steps.firstIndex(of: .write(BeltWrite(characteristic: FTMSDialect.controlPointUUID, bytes: [0x00]))))
+    check(handshakeIndex < controlIndex, "identify first, then ask for control")
+    check(steps.contains(.subscribe(FTMSDialect.supplementNotifyUUID, pauseAfter: 0.3)),
+          "replies are subscribed so they reach the log")
+
+    // Before each command that drives the belt, and only those.
+    check(z1.preamble(for: .start) == FTMSDialect.handshake)
+    check(z1.preamble(for: .setSpeed(30)) == FTMSDialect.handshake)
+    check(z1.preamble(for: .setSpeed(0)) == FTMSDialect.handshake, "stop counts too")
+    check(z1.preamble(for: .askStats) == nil)
+    check(ClassicDialect().preamble(for: .start) == nil, "the classic belt has no such thing")
+
+    // Whatever the belt answers is surfaced verbatim.
+    let reply = z1.decode(characteristic: FTMSDialect.supplementNotifyUUID, bytes: [0x01, 0x02, 0xAB], now: Date())
+    check(reply.contains { if case .note(let text, _) = $0 { return text.contains("01 02 ab") }; return false })
 }

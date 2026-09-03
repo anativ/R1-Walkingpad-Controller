@@ -19,6 +19,20 @@ public enum FTMS {
     /// Notify: started / stopped / target changed events.
     public static let machineStatusUUID16: UInt16 = 0x2ADA
 
+    // MARK: KingSmith supplement service (KS-HD-* belts)
+
+    /// The vendor channel beside FTMS on the Z1 generation. The KS Fit app asks it for the belt's
+    /// property list before every Control Point command, and the firmware refuses control until
+    /// it has seen that request at least once (mcdax/walkingpad-controller, KS Fit decompilation).
+    public enum Supplement {
+        public static let serviceUUID = "24E2521C-F63B-48ED-85BE-C5330A00FDF7"
+        public static let notifyUUID = "24E2521C-F63B-48ED-85BE-C5330B00FDF7"
+        public static let writeUUID = "24E2521C-F63B-48ED-85BE-C5330D00FDF7"
+        /// "Request all properties", as captured on the wire from the vendor app. The same frame
+        /// builder serves the MC-21's ODM channel and the KS-HD supplement channel.
+        public static let propertyListBytes: [UInt8] = [0x01, 0x00, 0x0D, 0x00, 0x06, 0x0B, 0x0F, 0x0D]
+    }
+
     // MARK: Control Point opcodes
 
     public enum Opcode: UInt8, Sendable {

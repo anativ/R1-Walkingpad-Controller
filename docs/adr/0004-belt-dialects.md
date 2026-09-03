@@ -81,8 +81,15 @@ services at once and picked the protocol from whatever answered, with no user-fa
   own remembered start speed, which the app cannot see or cap. That is inherent to the protocol;
   the settle delay lengthens the window by two seconds. The app's own ceiling is enforced at the
   wire the moment the target does go out.
-- A belt that pushes status is watched: ten seconds of silence on a connected link drops it and
-  the reconnect logic takes over, so a stalled stream never shows as a running belt.
+- A belt that pushes status is watched: ten seconds of silence on a moving belt drops the link
+  and the reconnect logic takes over, so a stalled stream never shows as a running belt.
+- **The Z1F refused every Control Point command on the first hardware test** (connected, live
+  data, no response to start). The same failure is on record for another Z1F in the reference
+  project, unresolved there. The decompiled vendor app writes a "property list" request to the
+  belt's supplement service before each command, which the firmware treats as the handshake
+  that unlocks control. The dialect now does the same, on setup and before every command, and
+  logs the replies raw. Unverified until the belt answers; the Diagnostics "Copy" button exists
+  so that answer can travel from whoever has the belt to whoever has the code.
 - Existing users see one new setting, defaulted to what they had.
 - Belt-side preferences, modes and the stored-session card do not exist for the Z1 family. The
   Z1's own vendor "supplement" service could carry some of them and is a candidate for later.

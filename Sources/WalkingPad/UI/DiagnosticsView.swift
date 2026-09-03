@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import WalkingPadKit
 
@@ -7,6 +8,14 @@ struct DiagnosticsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                row("Belt model", app.padFamily.label)
+                if let range = app.controller.beltSpeedRange {
+                    row("Belt range", String(format: "%.2f–%.2f km/h, step %.2f",
+                                             range.minKph, range.maxKph, range.incrementKph))
+                }
+            }
+            .font(.system(.caption, design: .monospaced))
             if let status = app.status {
                 VStack(alignment: .leading, spacing: 4) {
                     row("Last frame", status.hexDump)
@@ -31,6 +40,9 @@ struct DiagnosticsView: View {
             HStack {
                 Text("Event log").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 Spacer()
+                // The whole exchange, ready to paste into a message: this is how a belt that
+                // "connects but does nothing" gets diagnosed from another Mac.
+                Button("Copy") { copyLog() }.controlSize(.small)
                 Button("Clear") { app.controller.clearLog() }.controlSize(.small)
             }
 
@@ -61,6 +73,18 @@ struct DiagnosticsView: View {
             }
         }
         .padding(.top, 8)
+    }
+
+    private func copyLog() {
+        let header = "WalkingPad diagnostics — belt model: \(app.padFamily.label); state: "
+            + app.controller.state.label
+            + (app.status.map { "; last frame: \($0.hexDump)" } ?? "")
+        let lines = app.controller.log.map { entry in
+            "\(entry.at.formatted(date: .omitted, time: .standard))  \(entry.text)"
+        }
+        let text = ([header] + lines).joined(separator: "\n")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     private func color(for kind: PadLogEntry.Kind) -> Color {
