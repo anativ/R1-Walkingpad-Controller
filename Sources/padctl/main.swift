@@ -86,6 +86,10 @@ let allChecks: [(String, () throws -> Void)] = [
     ("wire clamp applies every limit and only lowers", wireClampAppliesEveryLimitAndOnlyLowers),
     ("ftms wakes the belt over the vendor service before control", ftmsWakesTheBeltOverTheVendorServiceBeforeControl),
     ("verbose log follows the family unless overridden", verboseLogFollowsTheFamilyUnlessOverridden),
+    ("ks text encodes and decodes with every table", ksTextEncodesAndDecodesWithEveryTable),
+    ("ks text props become a status", ksTextPropsBecomeAStatus),
+    ("ks text handshake learns the table and completes", ksTextHandshakeLearnsTheTableAndCompletes),
+    ("z1 dialect switches to the text channel after the handshake", z1DialectSwitchesToTheTextChannelAfterTheHandshake),
 ]
 
 func usage() -> Never {

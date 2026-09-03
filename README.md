@@ -435,11 +435,16 @@ all handled:
   the speed is held until the belt reports movement, then for two more seconds, then sent.
 - **Request control is often refused** with "operation failed", yet the commands that follow
   are honoured. The refusal is logged and ignored.
-- **A belt in standby ignores FTMS entirely** — no notifications, no replies, commands dropped
-  without a word — until it is woken over KingSmith's vendor service (`24e2521c-…`), which the
-  KS Fit app does before anything else. This app sends the wake frame after subscribing and
-  again before every start, asks the belt for a status report, and shows the vendor replies
-  decoded in Diagnostics.
+- **Some firmware does not answer on FTMS at all.** A Z1F on firmware V0.0.6 accepts every
+  read and every write, confirms every subscription, and then never sends a byte — no
+  Treadmill Data, no result codes, no events. The KS Fit app drives such belts over a second
+  channel on the vendor service (`24e2521c-…`, characteristics `…0e00` / `…0f00`): an
+  obfuscated text protocol. Commands are ASCII (`props runState 1`, `props CurrentSpeed 3.5`,
+  `servers getProp …`), base64-encoded, run through one of seven substitution tables, and sent
+  in 16-byte pieces; the belt's table is learned from its replies during an eight-step
+  greeting. When the belt has that pair, this app completes the greeting after connecting and
+  then polls status and sends every command over it. Without the pair it stays on FTMS, after
+  sending the vendor wake frame.
 
 The belt also reports its supported speed range (`2AD4`), which the app treats as a hard limit
 on top of its own ceiling.

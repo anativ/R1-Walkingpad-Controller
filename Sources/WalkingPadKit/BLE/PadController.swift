@@ -349,6 +349,8 @@ public final class PadController: NSObject, ObservableObject {
         setupAwaiting = nil
         setupStepTimer?.invalidate()
         setupStepTimer = nil
+        writeBacklog.removeAll()
+        writeChainActive = false
         firstStatusTimer?.invalidate()
         firstStatusTimer = nil
         queue.removeAll()
@@ -446,7 +448,7 @@ public final class PadController: NSObject, ObservableObject {
 
     /// Control commands always win over a queued status poll.
     private func sendNext() {
-        guard let command = queue.dequeue(), let peripheral else { return }
+        guard let command = queue.dequeue(), peripheral != nil else { return }
 
         if SpeedGate.shouldHold(
             command, beltIsMoving: status?.isMoving ?? false, dialectHolds: dialect.holdsSpeedUntilBeltMoves
@@ -477,13 +479,13 @@ public final class PadController: NSObject, ObservableObject {
             targetSpeedRaw = limited > 0 ? limited : nil
         }
 
-        guard let write = dialect.encode(outgoing),
-              let characteristic = characteristics[write.characteristic] else { return }
-        if let preamble = dialect.preamble(for: outgoing),
-           let preambleCharacteristic = characteristics[preamble.characteristic] {
-            perform(preamble, on: peripheral, characteristic: preambleCharacteristic)
+        guard let write = dialect.encode(outgoing), characteristics[write.characteristic] != nil else { return }
+        var writes: [BeltWrite] = []
+        if let preamble = dialect.preamble(for: outgoing), characteristics[preamble.characteristic] != nil {
+            writes.append(preamble)
         }
-        perform(write, on: peripheral, characteristic: characteristic)
+        writes.append(write)
+        scheduleWrites(writes, spacing: KSText.chunkSpacing)
         lastSendAt = Date()
         if case .setSpeed = outgoing { armSpeedConfirmDeadline() }
         if !outgoing.isStatusPoll {
@@ -495,6 +497,40 @@ public final class PadController: NSObject, ObservableObject {
         let type: CBCharacteristicWriteType =
             characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
         peripheral.writeValue(Data(write.bytes), for: characteristic, type: type)
+    }
+
+    /// Writes waiting their turn, each already cut to the size its firmware accepts.
+    private var writeBacklog: [(characteristic: CBUUID, bytes: [UInt8], spacing: TimeInterval)] = []
+    private var writeChainActive = false
+
+    /// Queue writes to go out in order, `spacing` apart, one BLE write at a time. Multi-piece
+    /// writes (the text protocol's 16-byte chunks) stay contiguous and in order.
+    private func scheduleWrites(_ writes: [BeltWrite], spacing: TimeInterval) {
+        for write in writes {
+            guard characteristics[write.characteristic] != nil else { continue }
+            for piece in write.pieces {
+                writeBacklog.append((write.characteristic, piece, spacing))
+            }
+        }
+        drainWriteBacklog()
+    }
+
+    private func drainWriteBacklog() {
+        guard !writeChainActive, !writeBacklog.isEmpty else { return }
+        guard let peripheral else { writeBacklog.removeAll(); return }
+        let next = writeBacklog.removeFirst()
+        guard let characteristic = characteristics[next.characteristic] else { drainWriteBacklog(); return }
+        writeChainActive = true
+        perform(BeltWrite(characteristic: next.characteristic, bytes: next.bytes), on: peripheral, characteristic: characteristic)
+        if verboseLogging, writeBacklog.first?.characteristic == next.characteristic || next.bytes.count == KSText.chunkSize {
+            appendLog("TX chunk \(next.bytes.map { String(format: "%02x", $0) }.joined(separator: " "))", .tx)
+        }
+        let delay = writeBacklog.isEmpty ? 0 : next.spacing
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.writeChainActive = false
+            self.drainWriteBacklog()
+        }
     }
 
     /// The belt started moving: give the motor a moment to settle, then release the speed that
@@ -745,7 +781,7 @@ extension PadController: CBPeripheralDelegate {
         }
         pendingServiceDiscoveries = services.count
         for service in services {
-            peripheral.discoverCharacteristics(dialect.characteristicUUIDs, for: service)
+            peripheral.discoverCharacteristics(dialect.characteristicUUIDs(for: service.uuid), for: service)
         }
     }
 
@@ -759,8 +795,11 @@ extension PadController: CBPeripheralDelegate {
         for characteristic in service.characteristics ?? [] {
             characteristics[characteristic.uuid] = characteristic
         }
+        let found = (service.characteristics ?? []).map { "\($0.uuid) [\(describe($0.properties))]" }
+        appendLog("Service \(service.uuid): \(found.isEmpty ? "no characteristics" : found.joined(separator: ", "))", .info)
         pendingServiceDiscoveries -= 1
         guard pendingServiceDiscoveries <= 0, !isReady else { return }
+        dialect.didDiscover(characteristics: Set(characteristics.keys))
 
         let missing = dialect.requiredCharacteristicUUIDs.filter { characteristics[$0] == nil }
         guard missing.isEmpty else {
@@ -774,6 +813,19 @@ extension PadController: CBPeripheralDelegate {
         }
         runSetup(dialect.setupSteps, on: peripheral)
     }
+
+    private func describe(_ properties: CBCharacteristicProperties) -> String {
+        var parts: [String] = []
+        if properties.contains(.read) { parts.append("read") }
+        if properties.contains(.write) { parts.append("write") }
+        if properties.contains(.writeWithoutResponse) { parts.append("write-no-rsp") }
+        if properties.contains(.notify) { parts.append("notify") }
+        if properties.contains(.indicate) { parts.append("indicate") }
+        return parts.joined(separator: " ")
+    }
+
+    /// Stands in for a characteristic while a setup step waits on the dialect's handshake.
+    private static let handshakeMarker = CBUUID(string: "FFFF")
 
     /// Walk the dialect's bring-up sequence one confirmed step at a time.
     ///
@@ -820,7 +872,16 @@ extension PadController: CBPeripheralDelegate {
             } else {
                 setupPauseAfter = 0.1
             }
-            perform(write, on: peripheral, characteristic: characteristic)
+            scheduleWrites([write], spacing: KSText.chunkSpacing)
+        case .handshake(let budget):
+            setupAwaiting = PadController.handshakeMarker
+            setupStepTimer = Timer.scheduledTimer(withTimeInterval: budget, repeats: false) { [weak self] _ in
+                guard let self, self.setupAwaiting == PadController.handshakeMarker else { return }
+                self.appendLog("Handshake not completed within \(Int(budget))s — continuing with FTMS only", .warning)
+                self.completeSetupStep(for: PadController.handshakeMarker)
+            }
+            for event in dialect.beginHandshake(now: Date()) { handle(event) }
+            return
         }
         if setupAwaiting != nil {
             setupStepTimer = Timer.scheduledTimer(
@@ -941,6 +1002,15 @@ extension PadController: CBPeripheralDelegate {
             appendLog(text, isWarning ? .warning : .info)
         case .unknown(let bytes):
             appendLog("RX \(bytes.map { String(format: "%02x", $0) }.joined(separator: " "))", .rx)
+        case .send(let writes, let spacing):
+            for write in writes {
+                appendLog("TX \(write.bytes.map { String(format: "%02x", $0) }.joined(separator: " "))", .tx)
+            }
+            scheduleWrites(writes, spacing: spacing)
+        case .handshakeComplete:
+            if setupAwaiting == PadController.handshakeMarker {
+                completeSetupStep(for: PadController.handshakeMarker)
+            }
         }
     }
 

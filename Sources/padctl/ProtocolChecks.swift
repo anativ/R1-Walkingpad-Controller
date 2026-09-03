@@ -1771,7 +1771,12 @@ func ftmsSetupIsStaggeredAndEndsWithRequestControl() throws {
     }
     check(subscribed == [FTMSDialect.machineStatusUUID, FTMSDialect.trainingStatusUUID,
                          FTMSDialect.controlPointUUID, FTMSDialect.treadmillDataUUID,
-                         FTMSDialect.supplementNotifyUUID], "the vendor app's subscription order")
+                         FTMSDialect.supplementNotifyUUID, FTMSDialect.textNotifyUUID],
+          "the vendor app's subscription order, then the vendor channels")
+    check(steps.contains(.handshake(budget: 10)), "the text handshake has its place and its deadline")
+    let handshakeIndex = try require(steps.firstIndex(of: .handshake(budget: 10)))
+    let textSubscribeIndex = try require(steps.firstIndex(of: .subscribe(FTMSDialect.textNotifyUUID, pauseAfter: 0.3)))
+    check(textSubscribeIndex < handshakeIndex, "subscribed before the belt is asked anything")
     check(steps.contains(.read(FTMSDialect.speedRangeUUID)))
     check(steps.contains(.read(FTMSDialect.featureUUID)))
     check(steps.contains(.read(FTMSDialect.softwareRevisionUUID)), "firmware version goes in the log")
@@ -1910,4 +1915,174 @@ func verboseLogFollowsTheFamilyUnlessOverridden() throws {
     check(!PadFamily.verboseLog(override: nil, family: .classic), "classic defaults to quiet")
     check(!PadFamily.verboseLog(override: false, family: .ftms), "the user can turn it off on a Z1")
     check(PadFamily.verboseLog(override: true, family: .classic), "or on for a classic belt")
+}
+
+// MARK: - KingSmith text protocol (Z1F firmware V0.0.6)
+
+/// Every command must survive the trip through base64, the substitution table and back, for
+/// every table the firmware is known to use.
+func ksTextEncodesAndDecodesWithEveryTable() throws {
+    check(KSText.tables.count == 7)
+    for table in KSText.tables {
+        check(table.utf8.count == 65, "a table is the base64 alphabet plus '=', permuted")
+        check(Set(table).count == 65, "no character may appear twice, or decoding is ambiguous")
+        for command in ["", "shake", KSText.start, KSText.setSpeed(raw: 35), KSText.pollStatus] {
+            let bytes = KSText.encode(command, table: table)
+            check(bytes.last == KSText.terminator, "every command ends with a carriage return")
+            check(KSText.decode(bytes, table: table) == command, "round trip failed for '\(command)'")
+        }
+    }
+    check(KSText.setSpeed(raw: 35) == "props CurrentSpeed 3.5")
+    check(KSText.setSpeed(raw: 40) == "props CurrentSpeed 4.0")
+    check(KSText.setSpeed(raw: 5) == "props CurrentSpeed 0.5")
+    check(KSText.setMode(.manual) == "props ControlMode 1")
+    check(KSText.stop == "props runState 0")
+
+    // A long command goes out in 16-byte pieces, in order, nothing lost.
+    let poll = KSText.encode(KSText.pollStatus, table: KSText.tables[0])
+    let write = BeltWrite(characteristic: FTMSDialect.textWriteUUID, bytes: poll, chunkSize: KSText.chunkSize)
+    check(write.pieces.count == (poll.count + 15) / 16)
+    check(write.pieces.allSatisfy { $0.count <= 16 })
+    check(write.pieces.flatMap { $0 } == poll)
+    check(BeltWrite(characteristic: FTMSDialect.textWriteUUID, bytes: [1, 2, 3]).pieces == [[1, 2, 3]], "no chunk size, no chunking")
+
+    // The same command in every spelling, duplicates dropped, so an unknown table can be probed.
+    // The tables differ in a handful of positions only, so short commands often collapse to one
+    // spelling — which is why the table is learned from the belt's replies, not from probing.
+    let spellings = KSText.encodeForAllTables("time_posix 1700000000")
+    check(spellings.count >= 1 && spellings.count <= 7)
+    check(Set(spellings.map { $0.count }).count == 1, "same length in every table")
+    check(KSText.encodeForAllTables("").count == 1, "the empty greeting is the same in every table")
+    // The replies that matter do tell the tables apart.
+    let replies = KSText.tables.map { KSText.encode("format error", table: $0) }
+    check(Set(replies.map { $0 }).count > 1, "'format error' is spelled differently by different tables")
+}
+
+/// The belt's `props` replies carry the same facts as the classic status frame under text names,
+/// and become the same `PadStatus`.
+func ksTextPropsBecomeAStatus() throws {
+    let props = try require(KSText.parseProps("props runState 1 CurrentSpeed 3.5 ControlMode 1 RunningTotalTime 554 RunningDistance 1234 RunningSteps 977 BurnCalories \"12\""))
+    check(props["runState"] == "1" && props["CurrentSpeed"] == "3.5" && props["BurnCalories"] == "12", "quotes are stripped")
+    var assembler = KSText.StatusAssembler()
+    let status = try require(assembler.apply(props, raw: [0x01], now: Date()))
+    check(status.beltState == .running)
+    check(status.speedRaw == 35 && status.speedKph == 3.5)
+    check(status.mode == .manual)
+    check(status.elapsed == 554)
+    check(status.distanceRaw == 123, "metres become 10 m units")
+    check(status.steps == 977)
+    check(status.isMoving)
+
+    // A partial reply keeps what it does not mention; standby and starting map like the classic belt.
+    let idle = try require(assembler.apply(try require(KSText.parseProps("props runState 5 CurrentSpeed 0.0")), raw: [], now: Date()))
+    check(idle.beltState == .standby && !idle.isMoving)
+    check(idle.elapsed == 554 && idle.steps == 977, "counters carried forward")
+    let starting = try require(assembler.apply(try require(KSText.parseProps("props runState 9")), raw: [], now: Date()))
+    check(starting.beltState == .starting)
+    check(KSText.parseProps("servers getProp 1") == nil)
+    check(KSText.parseProps("format error") == nil)
+    check(assembler.apply(try require(KSText.parseProps("props Unit 0")), raw: [], now: Date()) == nil, "nothing the app shows, no status")
+}
+
+/// A pretend belt using table 4 answers each greeting; the handshake must learn the table and
+/// finish in eight steps, then drive the belt over that channel.
+func ksTextHandshakeLearnsTheTableAndCompletes() throws {
+    let beltTable = KSText.tables[3]
+    func reply(_ text: String) -> [UInt8] { KSText.encode(text, table: beltTable) }
+
+    var handshake = KSText.Handshake()
+    check(!handshake.isComplete && handshake.table == nil)
+    check(handshake.command() == "", "the first greeting is an empty command")
+    check(handshake.payloads().contains(KSText.encode("", table: beltTable)), "the belt's spelling is among those tried")
+
+    let replies = ["format error", "shake", "net", "get_dn", "get_pk", "time_posix 1700000000", "version V0.0.6"]
+    for (index, text) in replies.enumerated() {
+        check(handshake.step == index, "step \(index) expected, at \(handshake.step)")
+        let decoded = try require(handshake.receive(reply(text)))
+        check(decoded == text)
+    }
+    check(handshake.step == 7)
+    check(handshake.command()?.hasPrefix("servers getProp") == true)
+    let final = try require(handshake.receive(reply("props runState 0 CurrentSpeed 0.0")))
+    check(KSText.parseProps(final) != nil)
+    check(handshake.isComplete, "a props reply to the last step completes the handshake")
+    check(handshake.table == beltTable, "the table is learned from the replies")
+    check(handshake.payloads().isEmpty, "nothing more to send")
+
+    // The time step carries the current epoch.
+    var timed = KSText.Handshake()
+    for text in ["format error", "shake", "net", "get_dn", "get_pk"] { _ = timed.receive(reply(text)) }
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    check(timed.command(now: now) == "time_posix 1800000000")
+
+    // Garbage neither advances nor crashes.
+    var noisy = KSText.Handshake()
+    check(noisy.receive([0xFF, 0x00, 0x0D]) == nil)
+    check(noisy.step == 0)
+    check(noisy.receive(reply("shake")) != nil && noisy.step == 0, "an out-of-order reply is heard but does not advance")
+}
+
+/// With the text pair present, the Z1 dialect runs the handshake over it and then routes every
+/// command and the status poll through the text channel; without the pair it stays on FTMS.
+func z1DialectSwitchesToTheTextChannelAfterTheHandshake() throws {
+    let beltTable = KSText.tables[1]
+    func reply(_ text: String) -> [UInt8] { KSText.encode(text, table: beltTable) }
+    let now = Date()
+
+    let plain = FTMSDialect()
+    plain.didDiscover(characteristics: [FTMSDialect.controlPointUUID, FTMSDialect.treadmillDataUUID])
+    check(plain.beginHandshake(now: now) == [.handshakeComplete], "no text pair, nothing to do")
+    check(!plain.pollsForStatus && !plain.usesTextProtocol)
+    check(plain.encode(.start)?.characteristic == FTMSDialect.controlPointUUID)
+    check(plain.characteristicUUIDs(for: FTMSDialect.supplementServiceUUID) == nil, "everything on the vendor service is discovered")
+    check(plain.characteristicUUIDs(for: FTMSDialect.serviceUUID) != nil)
+
+    let z1 = FTMSDialect()
+    z1.didDiscover(characteristics: [FTMSDialect.controlPointUUID, FTMSDialect.treadmillDataUUID,
+                                      FTMSDialect.textNotifyUUID, FTMSDialect.textWriteUUID])
+    let opening = z1.beginHandshake(now: now)
+    guard let sendEvent = opening.first(where: { if case .send = $0 { return true }; return false }),
+          case .send(let writes, let spacing) = sendEvent else { fail("handshake must start with writes"); return }
+    check(!writes.isEmpty && writes.allSatisfy { $0.characteristic == FTMSDialect.textWriteUUID && $0.chunkSize == KSText.chunkSize })
+    check(spacing == KSText.handshakeSpacing)
+    check(!opening.contains(.handshakeComplete))
+    check(!z1.pollsForStatus, "still FTMS until the belt answers")
+
+    // The belt answers each step; replies may arrive in pieces.
+    var lastEvents: [BeltEvent] = []
+    for text in ["format error", "shake", "net", "get_dn", "get_pk", "time_posix 1", "version V0.0.6"] {
+        let packet = reply(text)
+        let cut = packet.count / 2
+        check(z1.decode(characteristic: FTMSDialect.textNotifyUUID, bytes: Array(packet[..<cut]), now: now).isEmpty,
+              "half a reply produces nothing yet")
+        lastEvents = z1.decode(characteristic: FTMSDialect.textNotifyUUID, bytes: Array(packet[cut...]), now: now)
+        check(lastEvents.contains { if case .send = $0 { return true }; return false }, "each reply triggers the next step")
+        check(lastEvents.contains { if case .note(let t, _) = $0 { return t.contains(text) }; return false }, "decoded text is logged")
+    }
+    let done = z1.decode(characteristic: FTMSDialect.textNotifyUUID, bytes: reply("props runState 0 CurrentSpeed 0.0 RunningSteps 10"), now: now)
+    check(done.contains(.handshakeComplete))
+    check(done.contains { if case .status(let s) = $0 { return s.steps == 10 && !s.isMoving }; return false }, "the final reply is already a status")
+    check(z1.usesTextProtocol && z1.pollsForStatus, "from here on the text channel drives the belt")
+
+    // Commands now go out as text, in the belt's table, chunked; FTMS-only notions are gone.
+    func text(_ command: PadCommand) -> String? {
+        guard let write = z1.encode(command) else { return nil }
+        check(write.characteristic == FTMSDialect.textWriteUUID && write.chunkSize == KSText.chunkSize)
+        return KSText.decode(write.bytes, table: beltTable)
+    }
+    check(text(.askStats) == KSText.pollStatus, "status is polled")
+    check(text(.start) == "props runState 1")
+    check(text(.setSpeed(0)) == "props runState 0")
+    check(text(.setSpeed(35)) == "props CurrentSpeed 3.5")
+    check(text(.setMode(.manual)) == "props ControlMode 1")
+    check(z1.encode(.askHistory) == nil && z1.encode(.setPreference(.maxSpeed, type: 0, value: 60)) == nil)
+    check(z1.preamble(for: .start) == nil, "no FTMS wake once the text channel is in charge")
+
+    // A poll reply becomes a status; the belt's run state is what says "moving".
+    let moving = z1.decode(characteristic: FTMSDialect.textNotifyUUID, bytes: reply("props runState 1 CurrentSpeed 2.5 RunningTotalTime 30 RunningDistance 200 RunningSteps 40"), now: now)
+    check(moving.contains { if case .status(let s) = $0 { return s.isMoving && s.speedRaw == 25 && s.distanceRaw == 20 && s.elapsed == 30 }; return false })
+
+    // A new connection starts over.
+    z1.resetConnectionState()
+    check(!z1.usesTextProtocol && !z1.pollsForStatus)
 }

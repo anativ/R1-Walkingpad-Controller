@@ -5,14 +5,23 @@ import Foundation
 public struct BeltWrite: Equatable {
     public let characteristic: CBUUID
     public let bytes: [UInt8]
-    public init(characteristic: CBUUID, bytes: [UInt8]) {
+    /// Largest write the firmware accepts at once; longer payloads go out in pieces, in order.
+    public let chunkSize: Int?
+    public init(characteristic: CBUUID, bytes: [UInt8], chunkSize: Int? = nil) {
         self.characteristic = characteristic
         self.bytes = bytes
+        self.chunkSize = chunkSize
+    }
+
+    /// The pieces to write, honouring `chunkSize`.
+    public var pieces: [[UInt8]] {
+        guard let chunkSize, chunkSize > 0, bytes.count > chunkSize else { return [bytes] }
+        return stride(from: 0, to: bytes.count, by: chunkSize).map { Array(bytes[$0..<min($0 + chunkSize, bytes.count)]) }
     }
 }
 
 /// Something the belt told us, translated out of its own wire format.
-public enum BeltEvent: Equatable, Sendable {
+public enum BeltEvent: Equatable {
     case status(PadStatus)
     case record(PadRecord)
     /// The belt acknowledged a target speed, in the app's 0.1 km/h units.
@@ -24,6 +33,11 @@ public enum BeltEvent: Equatable, Sendable {
     /// Worth a line in the event log, nothing more.
     case note(String, isWarning: Bool)
     case unknown([UInt8])
+    /// The dialect wants these written now, in order, this far apart — a handshake reply that
+    /// calls for the next step, for instance. Not a user command, so it bypasses the command queue.
+    case send([BeltWrite], spacing: TimeInterval)
+    /// The dialect's reply-driven bring-up is finished (or there was none to do).
+    case handshakeComplete
 }
 
 /// A step of the link bring-up, run in order once every characteristic has been discovered.
@@ -32,6 +46,8 @@ public enum BeltSetupStep: Equatable {
     case subscribe(CBUUID, pauseAfter: TimeInterval)
     case read(CBUUID)
     case write(BeltWrite)
+    /// Hand over to the dialect's reply-driven bring-up (`beginHandshake`), for at most `budget`.
+    case handshake(budget: TimeInterval)
 }
 
 /// Everything protocol-specific the controller needs, so `PadController` itself only knows about
@@ -45,6 +61,13 @@ public protocol BeltDialect: AnyObject {
     /// Services to discover after connecting, and the characteristics wanted from each.
     var serviceUUIDs: [CBUUID] { get }
     var characteristicUUIDs: [CBUUID] { get }
+    /// Characteristics to discover on one service; nil means all of them.
+    func characteristicUUIDs(for service: CBUUID) -> [CBUUID]?
+    /// Told what the belt actually exposes, before bring-up starts.
+    func didDiscover(characteristics: Set<CBUUID>)
+    /// Start the reply-driven part of bring-up. Returns what to do first — writes to make, or
+    /// `.handshakeComplete` straight away when this belt needs none.
+    func beginHandshake(now: Date) -> [BeltEvent]
     /// Characteristics without which the belt cannot be driven.
     var requiredCharacteristicUUIDs: [CBUUID] { get }
     /// Lower-cased fragments a belt's advertised name may contain (the name-matching fallback scan).
@@ -68,6 +91,9 @@ public protocol BeltDialect: AnyObject {
 
 public extension BeltDialect {
     func preamble(for command: PadCommand) -> BeltWrite? { nil }
+    func characteristicUUIDs(for service: CBUUID) -> [CBUUID]? { characteristicUUIDs }
+    func didDiscover(characteristics: Set<CBUUID>) {}
+    func beginHandshake(now: Date) -> [BeltEvent] { [.handshakeComplete] }
 
     /// Whether a name seen during a broad scan is plausibly this family of belt.
     func looksLikeBelt(name: String?) -> Bool {
@@ -148,6 +174,9 @@ public final class FTMSDialect: BeltDialect {
     public static let supplementServiceUUID = CBUUID(string: FTMS.Supplement.serviceUUID)
     public static let supplementNotifyUUID = CBUUID(string: FTMS.Supplement.notifyUUID)
     public static let supplementWriteUUID = CBUUID(string: FTMS.Supplement.writeUUID)
+    /// The second pair on the same service: KingSmith's obfuscated text protocol (see `KSText`).
+    public static let textNotifyUUID = CBUUID(string: KSText.notifyUUID)
+    public static let textWriteUUID = CBUUID(string: KSText.writeUUID)
 
     private var assembler = FTMS.StatusAssembler()
     /// The firmware replays its last event the moment notifications are enabled — usually a
@@ -156,6 +185,15 @@ public final class FTMSDialect: BeltDialect {
     /// Treadmill Data frames the parser could not read are logged, a few per connection, so a
     /// belt speaking an unexpected layout shows up in the log instead of as silence.
     private var unparsedFramesLogged = 0
+
+    /// The text protocol, when the belt has the pair for it. Some firmware (the Z1F's V0.0.6)
+    /// answers nothing on FTMS at all; this is the channel the vendor app actually drives it on.
+    private var hasTextPair = false
+    private var handshake = KSText.Handshake()
+    /// Whether commands and status go over the text channel. Set once the handshake completes.
+    public private(set) var usesTextProtocol = false
+    private var textBuffer: [UInt8] = []
+    private var textAssembler = KSText.StatusAssembler()
 
     public init() {}
 
@@ -176,8 +214,43 @@ public final class FTMSDialect: BeltDialect {
     public var nameFragments: [String] {
         ["ks-hd", "ks-mc21", "ks-smc21c", "zp-zealr1", "walkingpad", "kingsmith", "z1"]
     }
-    public var pollsForStatus: Bool { false }
+    /// FTMS pushes status; the text protocol has to be asked.
+    public var pollsForStatus: Bool { usesTextProtocol }
     public var holdsSpeedUntilBeltMoves: Bool { true }
+
+    /// Every characteristic of the vendor service is discovered, because which pairs it carries
+    /// is exactly what decides how this belt can be driven.
+    public func characteristicUUIDs(for service: CBUUID) -> [CBUUID]? {
+        service == FTMSDialect.supplementServiceUUID ? nil : characteristicUUIDs
+    }
+
+    public func didDiscover(characteristics: Set<CBUUID>) {
+        hasTextPair = characteristics.contains(FTMSDialect.textNotifyUUID)
+            && characteristics.contains(FTMSDialect.textWriteUUID)
+    }
+
+    public func beginHandshake(now: Date) -> [BeltEvent] {
+        guard hasTextPair else { return [.handshakeComplete] }
+        handshake = KSText.Handshake()
+        return [.note("KingSmith text channel present — starting its handshake", isWarning: false)]
+            + handshakeWrites(now: now)
+    }
+
+    /// The current handshake step, in every spelling still possible, as chunked writes.
+    private func handshakeWrites(now: Date) -> [BeltEvent] {
+        let writes = handshake.payloads(now: now).map {
+            BeltWrite(characteristic: FTMSDialect.textWriteUUID, bytes: $0, chunkSize: KSText.chunkSize)
+        }
+        guard !writes.isEmpty else { return [] }
+        return [.send(writes, spacing: KSText.handshakeSpacing)]
+    }
+
+    /// A text command, encoded with the belt's table (or the likeliest one), chunked.
+    private func textWrite(_ command: String) -> BeltWrite {
+        let table = handshake.table ?? handshake.candidates.first ?? KSText.tables[0]
+        return BeltWrite(characteristic: FTMSDialect.textWriteUUID, bytes: KSText.encode(command, table: table),
+                         chunkSize: KSText.chunkSize)
+    }
 
     /// The firmware silently drops notification enables that land within ~30 ms of each other,
     /// so the subscriptions are staggered the way the vendor app does it (100 / 200 / 300 ms).
@@ -206,6 +279,8 @@ public final class FTMSDialect: BeltDialect {
             .read(FTMSDialect.softwareRevisionUUID),
             .write(FTMSDialect.wake),
             .write(BeltWrite(characteristic: FTMSDialect.supplementWriteUUID, bytes: FTMS.Supplement.queryStatusBytes)),
+            .subscribe(FTMSDialect.textNotifyUUID, pauseAfter: 0.3),
+            .handshake(budget: 10),
             .write(BeltWrite(characteristic: FTMSDialect.controlPointUUID, bytes: FTMS.requestControlBytes)),
         ]
     }
@@ -219,6 +294,7 @@ public final class FTMSDialect: BeltDialect {
     /// so it is woken once more right before. Speed and stop are left alone: a belt that is
     /// moving is awake by definition, and a stop must not be delayed by anything.
     public func preamble(for command: PadCommand) -> BeltWrite? {
+        guard !usesTextProtocol else { return nil }
         switch command {
         case .start: return FTMSDialect.wake
         default: return nil
@@ -226,6 +302,16 @@ public final class FTMSDialect: BeltDialect {
     }
 
     public func encode(_ command: PadCommand) -> BeltWrite? {
+        if usesTextProtocol {
+            switch command {
+            case .askStats: return textWrite(KSText.pollStatus)
+            case .start: return textWrite(KSText.start)
+            case .setSpeed(0): return textWrite(KSText.stop)
+            case .setSpeed(let raw): return textWrite(KSText.setSpeed(raw: raw))
+            case .setMode(let mode): return textWrite(KSText.setMode(mode))
+            case .askHistory, .setPreference: return nil
+            }
+        }
         let cp = FTMSDialect.controlPointUUID
         switch command {
         case .start:
@@ -297,6 +383,31 @@ public final class FTMSDialect: BeltDialect {
         case FTMSDialect.supplementNotifyUUID:
             return [.note(FTMS.Supplement.describe(bytes), isWarning: false)]
 
+        case FTMSDialect.textNotifyUUID:
+            // Replies arrive in pieces and end with a carriage return.
+            textBuffer += bytes
+            guard textBuffer.last == KSText.terminator else { return [] }
+            let packet = textBuffer
+            textBuffer.removeAll()
+            let wasComplete = handshake.isComplete
+            guard let text = handshake.receive(packet) else {
+                return [.note("KS text reply not decodable: " + packet.map { String(format: "%02x", $0) }.joined(separator: " "),
+                              isWarning: true)]
+            }
+            var events: [BeltEvent] = [.note("KS: \(text.isEmpty ? "(empty)" : text)", isWarning: false)]
+            if let props = KSText.parseProps(text), let status = textAssembler.apply(props, raw: packet, now: now) {
+                events.append(.status(status))
+            }
+            if handshake.isComplete, !wasComplete {
+                usesTextProtocol = true
+                let table = handshake.table.map { "table \(KSText.tables.firstIndex(of: $0).map { $0 + 1 } ?? 0)" } ?? "table undecided"
+                events.append(.note("KingSmith text handshake complete (\(table)) — driving the belt over it", isWarning: false))
+                events.append(.handshakeComplete)
+            } else if !handshake.isComplete {
+                events += handshakeWrites(now: now)
+            }
+            return events
+
         default:
             return [.unknown(bytes)]
         }
@@ -306,5 +417,10 @@ public final class FTMSDialect: BeltDialect {
         assembler = FTMS.StatusAssembler()
         sawFirstMachineEvent = false
         unparsedFramesLogged = 0
+        hasTextPair = false
+        handshake = KSText.Handshake()
+        usesTextProtocol = false
+        textBuffer.removeAll()
+        textAssembler = KSText.StatusAssembler()
     }
 }

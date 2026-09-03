@@ -91,9 +91,19 @@ services at once and picked the protocol from whatever answered, with no user-fa
   service. The reading that fits every fact: a Z1 in standby ignores FTMS entirely until woken,
   and the vendor app wakes it first. The dialect now sends the wake frame during bring-up and
   before every start, queries a status report, and decodes the belt's `WL…` replies for the log.
-  The earlier "property list" guess (an MC-21 frame) drew no reply and is gone. Still unverified
-  until a Z1F answers; the Diagnostics "Copy" button exists so that answer can travel from
-  whoever has the belt to whoever has the code.
+  The earlier "property list" guess (an MC-21 frame) drew no reply and is gone.
+- **The wake frame drew no reply either.** The remaining lead is the other characteristic pair on
+  the vendor service, which the reference notes list for "v6" firmware and which while-loop/c3p0
+  (built from the KS Fit APK) drives with an obfuscated text protocol: base64 plus one of seven
+  substitution tables, an eight-step greeting that reveals the belt's table, `servers getProp`
+  polling for status and `props …` writes for control. The values it reports — `runState`,
+  `ControlMode`, `CurrentSpeed`, `RunningTotalTime`, `RunningDistance`, `RunningSteps` — are the
+  classic status frame under text names, so they become the same `PadStatus`. The dialect now
+  discovers every characteristic of the vendor service, runs that greeting when the pair exists,
+  and switches to the text channel for status and control when it completes; otherwise it stays
+  on FTMS. The codec, the greeting and the switch-over are covered by `padctl selftest` against a
+  simulated belt; only a real Z1F can confirm the firmware speaks it. The Diagnostics "Copy"
+  button exists so that answer can travel from whoever has the belt to whoever has the code.
 - Existing users see one new setting, defaulted to what they had.
 - Belt-side preferences, modes and the stored-session card do not exist for the Z1 family. The
   Z1's own vendor "supplement" service could carry some of them and is a candidate for later.
