@@ -1,7 +1,9 @@
 # WalkingPad Z1F — investigation report
 
-Status as of 3 September 2026, app v1.7. The belt under test is on another Mac; every fact
+Status as of 4 September 2026, app v1.8. The belt under test is on another Mac; every fact
 below comes from its diagnostics logs, from public reverse-engineering work, or from the code.
+The five logs received so far are in the appendix, verbatim. No log from v1.6, v1.7 or v1.8
+has arrived yet.
 
 ## Summary
 
@@ -50,8 +52,9 @@ connected, reads fine, every Control Point command timed out, belt never started
   Control Point result code (even to Request Control), not a reply to any vendor frame.
 - **The belt itself works** with the KS Fit app and the remote (reported by the owner).
 - **The app's own machinery works.** The classic R1 Pro path is unchanged and in daily use;
-  88 selftest checks cover the FTMS codec, the vendor frames, the text protocol codec, the
-  handshake against a simulated belt, and the safety clamps.
+  89 selftest checks cover the FTMS codec, the vendor frames, the text protocol codec, the
+  handshake against a simulated belt (including the v1.8 supplement-pair fallback), and the
+  safety clamps.
 
 ## What was tried, in order
 
@@ -69,6 +72,29 @@ connected, reads fine, every Control Point command timed out, belt never started
 Two things were fixed along the way that were real but not the cause: the timer-based
 bring-up (v1.2) and the strict "More Data" handling (v1.3). A code review also closed two
 safety gaps unrelated to the Z1F, where a speed above the ceiling could have reached a belt.
+
+## What the logs actually show
+
+Five captures, all 3 September 2026, all from the owner's Mac. Full text in the appendix.
+The pattern is the same in every one: the Mac talks, the belt never does.
+
+| What we needed to know | The line that answers it | Log |
+| --- | --- | --- |
+| The belt is the Z1F | `Found KS-HD-Z1D (-59 to -67 dBm)` | 3, 4, 5 |
+| It is firmware V0.0.6 | `Belt firmware: V0.0.6` | 4, 5 |
+| FTMS feature bits match the other failed Z1F | `Machine features 0x00001244, target features 0x00000001` | 4, 5 |
+| Notifications are really on | `Notifications on for 2ADA` / `2AD3` / `2AD9` / `2ACD` / `…0B00`, then `Ready — notifications on: …` | 3, 4, 5 |
+| Vendor writes left the Mac | v1.4 `TX 01 00 0d 00 06 0b 0f 0d` then `TX 20 00 00 00 20`; v1.5 `TX 72 01 03 0a 00 00 80` then `TX 72 00 00 72` | 4, 5 |
+| Request-control left the Mac | `TX 00` immediately before `Ready` | 4, 5 |
+| Start left the Mac, speed was held | `TX 07` then `Holding 2.5 km/h until the belt is moving` | 1, 4, 5 |
+| Nothing came back | No `First status frame`, no `RX`, no `Unreadable treadmill data`, no `Belt status (WLR)`, no `Supplement reply`, no write-failed line | all five |
+| The app noticed | `No status from the belt 5s after connecting` | 3, 4, 5 |
+
+v1.2's `log show` was run without `--debug`, so the `TX` bytes are missing from log 3; the
+later Diagnostics copies have them. Discovery in every log lists only the characteristics
+the app asked for — `…0E00` / `…0F00` would not appear even if they existed. That is why
+v1.6 started listing every characteristic on the vendor service, and why the next useful
+log is a v1.7/v1.8 Desktop report, not another `log show`.
 
 ## Why the earlier explanations fell
 
@@ -306,3 +332,7 @@ absence of any "Write failed" line means the belt acknowledged them at the link 
 reads (`Machine features`, `Belt speed range`, `Belt firmware`) prove the belt's attribute
 table is readable. No `First status frame`, `Unreadable treadmill data frame`, `Belt accepted`,
 `Belt rejected`, `Belt reports`, `Belt status (WLR)` or `Supplement reply` line ever appeared.
+
+Nothing from v1.6 onward is in this appendix. Those builds change which characteristics are
+listed and which bytes go out; until a Desktop report from one of them arrives, the table
+above is the whole evidence.
