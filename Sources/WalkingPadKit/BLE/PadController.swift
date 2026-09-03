@@ -281,7 +281,7 @@ public final class PadController: NSObject, ObservableObject {
             self.inFlightSpeedRaw = nil
             self.appendLog(
                 "Belt did not confirm \(String(format: "%.1f", Double(pending) / 10)) km/h — it may be "
-                + "stopped, in automatic mode, or above the belt's own max speed",
+                + "stopped, in automatic mode, or outside the belt's own speed range",
                 .warning
             )
         }
@@ -583,6 +583,11 @@ public final class PadController: NSObject, ObservableObject {
     /// rather than leaving the last frame on screen as if it were live.
     private func checkStatusStream() {
         guard let peripheral, isReady else { return }
+        // Only a stalled stream from a *moving* belt is dangerous — that is a belt shown running
+        // when nobody knows. An idle belt that goes quiet is left alone, in case the firmware
+        // simply stops notifying in standby; the reference material says it does not, but that
+        // is unconfirmed on real hardware and a reconnect loop would be the worse mistake.
+        guard status?.isMoving == true else { return }
         let last = status?.receivedAt ?? readyAt ?? Date()
         let silence = Date().timeIntervalSince(last)
         guard silence > PadController.staleStatusBudget else { return }
@@ -819,6 +824,9 @@ extension PadController: CBPeripheralDelegate {
             appendLog("Stored session: \(r.steps) steps, \(String(format: "%.2f", r.distanceKm)) km", .info)
         case .speedAccepted(let raw):
             if inFlightSpeedRaw == raw { clearInFlightSpeed() }
+            // Whoever set it — this app or the physical remote — this is where the belt is now
+            // heading, so the ceiling check must reason about it (and never about a stale one).
+            targetSpeedRaw = raw > 0 ? raw : nil
         case .speedCommandAccepted:
             // The belt took the speed. If nothing newer is queued or held, that is the one we
             // are waiting on; the instantaneous speed will catch up as the motor ramps.

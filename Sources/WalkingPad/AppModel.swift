@@ -171,7 +171,10 @@ final class AppModel: ObservableObject {
                 ceilingKph: ceiling
             ) {
                 controller.appendLog(
-                    String(format: "Ceiling lowered to %.1f km/h — slowing the belt", ceiling), .warning
+                    String(format: isMoving
+                           ? "Ceiling lowered to %.1f km/h — slowing the belt"
+                           : "Ceiling lowered to %.1f km/h — the pending speed will be capped when it is sent",
+                           ceiling), .warning
                 )
                 sendSpeedToBelt(ceiling, mayStartBelt: false)
             }
