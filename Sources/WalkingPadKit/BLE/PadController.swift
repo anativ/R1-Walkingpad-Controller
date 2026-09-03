@@ -114,6 +114,12 @@ public final class PadController: NSObject, ObservableObject {
     /// at once and then ramps to it for several seconds, and a ceiling lowered during the ramp has
     /// to know where the belt is heading, not where it is.
     @Published public private(set) var targetSpeedRaw: UInt8?
+    /// Verbose logging: command and frame bytes go to unified logging at a level `log show` shows
+    /// without `--debug`, and a status frame is echoed every few seconds. Off, they stay at debug.
+    public var verboseLogging = false
+    private var lastVerboseStatusAt: Date?
+    private static let verboseStatusInterval: TimeInterval = 5.0
+
     /// The app's speed ceiling in 0.1 km/h, applied once more at the wire.
     ///
     /// The app clamps before it asks, but a speed can wait in the queue, or be held for the
@@ -634,7 +640,8 @@ public final class PadController: NSObject, ObservableObject {
         switch kind {
         case .warning: logger.warning("\(text, privacy: .public)")
         case .info: logger.notice("\(text, privacy: .public)")
-        case .tx, .rx: logger.debug("\(text, privacy: .public)")
+        case .tx, .rx:
+            if verboseLogging { logger.notice("\(text, privacy: .public)") } else { logger.debug("\(text, privacy: .public)") }
         }
         log.append(PadLogEntry(text: text, kind: kind, at: Date()))
         if log.count > 400 { log.removeFirst(log.count - 400) }
@@ -900,6 +907,11 @@ extension PadController: CBPeripheralDelegate {
             if status == nil {
                 // One line per connection proving data flows, and what the first frame looked like.
                 appendLog("First status frame: \(s.hexDump)", .rx)
+                lastVerboseStatusAt = s.receivedAt
+            } else if verboseLogging,
+                      s.receivedAt.timeIntervalSince(lastVerboseStatusAt ?? .distantPast) >= PadController.verboseStatusInterval {
+                lastVerboseStatusAt = s.receivedAt
+                appendLog(String(format: "Status: %@ → %.1f km/h, %ds, %d steps", s.hexDump, s.speedKph, s.elapsed, s.steps), .rx)
             }
             status = s
             if let want = inFlightSpeedRaw, s.speedRaw == want { clearInFlightSpeed() }

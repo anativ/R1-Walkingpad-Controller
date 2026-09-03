@@ -44,4 +44,14 @@ public enum PadFamily: String, CaseIterable, Codable, Sendable, Identifiable {
     public var supportsModes: Bool { self == .classic }
     /// Only the classic belt answers a "last stored session" query.
     public var supportsStoredSession: Bool { self == .classic }
+
+    /// Whether the Bluetooth log should be verbose unless the user says otherwise. The Z1 path is
+    /// still being understood against real belts, so every byte it exchanges should be easy to
+    /// collect; the classic protocol is settled and its poll chatter is noise.
+    public var defaultsToVerboseLog: Bool { self == .ftms }
+
+    /// The verbosity in force: the user's remembered choice if they made one, else the family default.
+    public static func verboseLog(override: Bool?, family: PadFamily) -> Bool {
+        override ?? family.defaultsToVerboseLog
+    }
 }

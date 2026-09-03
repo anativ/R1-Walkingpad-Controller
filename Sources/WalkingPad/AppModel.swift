@@ -26,7 +26,13 @@ struct AppSettings: Equatable {
     /// Which generation of belt to look for. Remembered, because a belt of the other family is
     /// invisible to the scan and "No belt found" is all the user would ever see.
     var padFamily: PadFamily = .default
+    /// Verbose Bluetooth log. Nil means "the family's default" (on for the Z1, off for the classic
+    /// belt); a value is the user's remembered choice.
+    var verboseBeltLog: Bool? = nil
     var unit: DistanceUnit = .kilometers
+
+    /// The verbosity actually in force.
+    var isBeltLogVerbose: Bool { PadFamily.verboseLog(override: verboseBeltLog, family: padFamily) }
     /// Everyday walking ceiling for the slider, presets and programs. Independent of the belt's
     /// own max-speed setting.
     var speedCeilingKph: Double = SpeedLimits.defaultWalkingCeilingKph
@@ -145,6 +151,7 @@ final class AppModel: ObservableObject {
             if newValue.padFamily != oldValue.padFamily {
                 controller.family = newValue.padFamily
             }
+            controller.verboseLogging = newValue.isBeltLogVerbose
             // A Slider whose value sits outside its own range misbehaves, so follow the ceiling down.
             let ceiling = SpeedLimits.effectiveCeiling(
                 walkingCeilingKph: newValue.speedCeilingKph, isRunningMode: newValue.isRunningMode,
@@ -281,6 +288,7 @@ final class AppModel: ObservableObject {
         applyDockIconPolicy(hidden: loaded.hideDockIcon)
 
         controller.family = loaded.padFamily
+        controller.verboseLogging = loaded.isBeltLogVerbose
         controller.speedCeilingRaw = PadController.rawSpeed(effectiveMaxSpeed)
         if settings.autoConnectOnLaunch { controller.connect() }
     }
@@ -292,6 +300,17 @@ final class AppModel: ObservableObject {
         guard settings.padFamily != family else { return }
         var updated = settings
         updated.padFamily = family
+        settings = updated
+    }
+
+    /// Whether the Bluetooth log is verbose right now.
+    var isBeltLogVerbose: Bool { settings.isBeltLogVerbose }
+
+    /// Remember a verbosity choice. It sticks across launches and family changes.
+    func setBeltLogVerbose(_ verbose: Bool) {
+        guard settings.isBeltLogVerbose != verbose || settings.verboseBeltLog == nil else { return }
+        var updated = settings
+        updated.verboseBeltLog = verbose
         settings = updated
     }
 
@@ -911,6 +930,11 @@ final class AppModel: ObservableObject {
 
     private func persist() {
         defaults.set(settings.padFamily.rawValue, forKey: Keys.padFamily)
+        if let verbose = settings.verboseBeltLog {
+            defaults.set(verbose, forKey: Keys.verboseBeltLog)
+        } else {
+            defaults.removeObject(forKey: Keys.verboseBeltLog)
+        }
         defaults.set(settings.unit.rawValue, forKey: Keys.unit)
         defaults.set(settings.speedCeilingKph, forKey: Keys.ceiling)
         defaults.set(settings.isRunningMode, forKey: Keys.runningMode)
@@ -960,6 +984,9 @@ final class AppModel: ObservableObject {
         var settings = AppSettings()
         if let raw = defaults.string(forKey: Keys.padFamily), let family = PadFamily(rawValue: raw) {
             settings.padFamily = family
+        }
+        if defaults.object(forKey: Keys.verboseBeltLog) != nil {
+            settings.verboseBeltLog = defaults.bool(forKey: Keys.verboseBeltLog)
         }
         if let raw = defaults.string(forKey: Keys.unit), let unit = DistanceUnit(rawValue: raw) {
             settings.unit = unit
@@ -1032,6 +1059,7 @@ final class AppModel: ObservableObject {
 
     private enum Keys {
         static let padFamily = "padFamily"
+        static let verboseBeltLog = "verboseBeltLog"
         static let unit = "unit"
         static let ceiling = "speedCeilingKph"
         static let runningMode = "isRunningMode"

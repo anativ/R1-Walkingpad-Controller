@@ -40,6 +40,14 @@ struct DiagnosticsView: View {
             HStack {
                 Text("Event log").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 Spacer()
+                Toggle("Verbose", isOn: Binding(
+                    get: { app.isBeltLogVerbose },
+                    set: { app.setBeltLogVerbose($0) }
+                ))
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+                .help("Log every command and frame at a level `log show` captures without --debug, "
+                      + "and echo a status frame every few seconds. On by default for the Z1 · Z1F.")
                 // The whole exchange, ready to paste into a message: this is how a belt that
                 // "connects but does nothing" gets diagnosed from another Mac.
                 Button("Copy") { copyLog() }.controlSize(.small)

@@ -35,6 +35,17 @@ struct AppPreferencesTab: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                Toggle("Verbose Bluetooth log", isOn: Binding(
+                    get: { app.isBeltLogVerbose },
+                    set: { app.setBeltLogVerbose($0) }
+                ))
+                Text("Every command and frame goes to the event log and to the system log at a level "
+                     + "that `log show --predicate 'subsystem == \"io.nativ.walkingpad\"'` shows without "
+                     + "--debug. On by default for the Z1 · Z1F while that belt is still being "
+                     + "understood; your choice is remembered.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Section("Display") {

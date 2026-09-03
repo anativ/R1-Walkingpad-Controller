@@ -1896,3 +1896,12 @@ func ftmsHandshakesOnTheSupplementServiceBeforeControl() throws {
     check(z1.decode(characteristic: FTMSDialect.featureUUID, bytes: [0x44, 0x12, 0, 0, 1, 0, 0, 0], now: Date())
             .contains { if case .note(let t, _) = $0 { return t.contains("0x00001244") }; return false })
 }
+
+/// The Z1 path logs verbosely unless told otherwise; the classic belt does not. A remembered
+/// choice wins over either default.
+func verboseLogFollowsTheFamilyUnlessOverridden() throws {
+    check(PadFamily.verboseLog(override: nil, family: .ftms), "Z1 defaults to verbose")
+    check(!PadFamily.verboseLog(override: nil, family: .classic), "classic defaults to quiet")
+    check(!PadFamily.verboseLog(override: false, family: .ftms), "the user can turn it off on a Z1")
+    check(PadFamily.verboseLog(override: true, family: .classic), "or on for a classic belt")
+}
