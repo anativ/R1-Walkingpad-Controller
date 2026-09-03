@@ -494,13 +494,20 @@ public final class PadController: NSObject, ObservableObject {
     }
 
     private func perform(_ write: BeltWrite, on peripheral: CBPeripheral, characteristic: CBCharacteristic) {
-        let type: CBCharacteristicWriteType =
-            characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
-        peripheral.writeValue(Data(write.bytes), for: characteristic, type: type)
+        peripheral.writeValue(Data(write.bytes), for: characteristic, type: PadController.writeType(write, on: characteristic))
+    }
+
+    /// Write Command if the dialect asked for it and the characteristic allows it; otherwise a
+    /// Write Request when the characteristic supports it.
+    static func writeType(_ write: BeltWrite, on characteristic: CBCharacteristic) -> CBCharacteristicWriteType {
+        if write.withoutResponse, characteristic.properties.contains(.writeWithoutResponse) {
+            return .withoutResponse
+        }
+        return characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
     }
 
     /// Writes waiting their turn, each already cut to the size its firmware accepts.
-    private var writeBacklog: [(characteristic: CBUUID, bytes: [UInt8], spacing: TimeInterval)] = []
+    private var writeBacklog: [(characteristic: CBUUID, bytes: [UInt8], spacing: TimeInterval, withoutResponse: Bool)] = []
     private var writeChainActive = false
 
     /// Queue writes to go out in order, `spacing` apart, one BLE write at a time. Multi-piece
@@ -509,7 +516,7 @@ public final class PadController: NSObject, ObservableObject {
         for write in writes {
             guard characteristics[write.characteristic] != nil else { continue }
             for piece in write.pieces {
-                writeBacklog.append((write.characteristic, piece, spacing))
+                writeBacklog.append((write.characteristic, piece, spacing, write.withoutResponse))
             }
         }
         drainWriteBacklog()
@@ -521,7 +528,8 @@ public final class PadController: NSObject, ObservableObject {
         let next = writeBacklog.removeFirst()
         guard let characteristic = characteristics[next.characteristic] else { drainWriteBacklog(); return }
         writeChainActive = true
-        perform(BeltWrite(characteristic: next.characteristic, bytes: next.bytes), on: peripheral, characteristic: characteristic)
+        perform(BeltWrite(characteristic: next.characteristic, bytes: next.bytes, withoutResponse: next.withoutResponse),
+                on: peripheral, characteristic: characteristic)
         if verboseLogging, writeBacklog.first?.characteristic == next.characteristic || next.bytes.count == KSText.chunkSize {
             appendLog("TX chunk \(next.bytes.map { String(format: "%02x", $0) }.joined(separator: " "))", .tx)
         }
@@ -868,10 +876,10 @@ extension PadController: CBPeripheralDelegate {
             appendLog("TX \(write.bytes.map { String(format: "%02x", $0) }.joined(separator: " "))", .tx)
             lastSendAt = Date()
             // A write without response gets no callback; give the belt a beat instead.
-            if characteristic.properties.contains(.write) {
+            if PadController.writeType(write, on: characteristic) == .withResponse {
                 setupAwaiting = write.characteristic
             } else {
-                setupPauseAfter = 0.1
+                setupPauseAfter = 0.3
             }
             scheduleWrites([write], spacing: KSText.chunkSpacing)
         case .handshake(let budget):

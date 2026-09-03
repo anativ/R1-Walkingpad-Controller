@@ -90,6 +90,7 @@ let allChecks: [(String, () throws -> Void)] = [
     ("ks text props become a status", ksTextPropsBecomeAStatus),
     ("ks text handshake learns the table and completes", ksTextHandshakeLearnsTheTableAndCompletes),
     ("z1 dialect switches to the text channel after the handshake", z1DialectSwitchesToTheTextChannelAfterTheHandshake),
+    ("z1 dialect falls back to the supplement pair for the text handshake", z1DialectFallsBackToTheSupplementPairForTheTextHandshake),
 ]
 
 func usage() -> Never {

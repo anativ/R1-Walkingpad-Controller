@@ -15,8 +15,9 @@ belt's remote work, so the belt is healthy and something in the exchange is miss
 The strongest remaining explanation is that firmware V0.0.6 does not use the standard
 Fitness Machine Service for anything and is driven instead over a second, obfuscated text
 protocol on the vendor service — the path the KS Fit APK takes on newer belts. v1.6 speaks
-that protocol; whether this belt has the characteristic pair for it, and answers, is what the
-next log will show.
+that protocol on the v6 `…0E00`/`…0F00` pair. v1.8 also tries it on the supplement
+`…0B00`/`…0D00` pair this belt already confirmed, and sends the vendor init frames
+(`71 00 …Z1D`, `71 01 …timestamp`) that the Swift SDK writes before any query.
 
 ## The device
 
@@ -63,6 +64,7 @@ connected, reads fine, every Control Point command timed out, belt never started
 | v1.5 | Belt is in standby and ignores FTMS until woken | Vendor **wake** `72 01 03 0a 00 00 80` and status query `72 00 00 72` | No reply |
 | v1.6 | V0.0.6 does not talk FTMS at all; KS Fit uses the obfuscated **text protocol** on the vendor service's second pair (`…0E00` / `…0F00`) | Discover every vendor characteristic; eight-step handshake; `props` commands; polled status | **Not yet tested on the belt** |
 | v1.7 | — | One-click diagnostics report to the Desktop | — |
+| v1.8 | Wake-only was the wrong vendor greeting; the text protocol may live on the pair we already have | Model+timestamp init frames before wake; Write Command on the vendor channel; text handshake falls back to `…0B00`/`…0D00`; `WLR` becomes a `PadStatus` | **Not yet tested on the belt** |
 
 Two things were fixed along the way that were real but not the cause: the timer-based
 bring-up (v1.2) and the strict "More Data" handling (v1.3). A code review also closed two
@@ -119,31 +121,30 @@ safety gaps unrelated to the Z1F, where a speed above the ceiling could have rea
   service table. If the belt's firmware was updated after the Mac first saw it, new
   characteristics can stay hidden until Bluetooth is turned off and on.
 - **Whether the vendor init frames matter.** The Swift SDK sends `71 00 05 64 91 5A 31 44 …`
-  (a model identifier ending in "Z1D") and a timestamp frame before its legacy queries. The
-  app does not send these; they may be what unlocks the `WLR` status replies on the
-  `…0B00` / `…0D00` pair.
+  (a model identifier ending in "Z1D") and a timestamp frame before its legacy queries. v1.8
+  sends them; the next log shows whether a `WLR` reply follows.
 - **What the belt does with FTMS at all on this firmware.** Perhaps nothing; perhaps only
   after the text greeting. Unknown until something answers.
 
 ## Next steps, in order
 
-1. **Run v1.7 on the belt and send the report.** Belt awake, display on, KS Fit fully
+1. **Run v1.8 on the belt and send the report.** Belt awake, display on, KS Fit fully
    closed on the phone (better: phone Bluetooth off). Connect, press Start, press
-   *Save diagnostics…*, send the Desktop file. Three lines decide the next move:
+   *Save diagnostics…*, send the Desktop file. The lines that decide the next move:
    - `Service 24E2521C-…: …` — does it list `…0E00` and `…0F00`?
-   - `KingSmith text channel present — starting its handshake` followed by `KS: …` replies.
-   - `Handshake not completed within 10s` — pair present, belt not answering.
+   - `TX 71 00 05 64 91 5a 31 44 …` then `TX 71 01 08 …` — init frames went out.
+   - `KingSmith text channel present` / `No v6 text pair — trying the handshake on the supplement channel` followed by `KS: …` replies.
+   - `Belt status (WLR): …` — the binary vendor channel answered; the UI should show speed.
+   - `Handshake not completed within …s` — pair present, belt not answering.
 2. **If the pair is missing:** turn Bluetooth off and on (clears the GATT cache), retry once.
-   If still missing, the belt has no text channel and the answer must come from a capture.
+   v1.8 already tries the handshake on `…0B00`/`…0D00` in that case.
 3. **If the pair answers but stops mid-greeting:** the reply text shows which step; compare
    against c3p0's expected tokens; the table list may need a new entry.
 4. **If nothing answers on any channel:** capture what KS Fit sends. On Android: Developer
    options → *Enable Bluetooth HCI snoop log*, run KS Fit, start and stop the belt once, pull
    the log with `adb bugreport`. On iPhone: Apple's Bluetooth logging profile and
    PacketLogger. One capture ends the guessing.
-5. **Then try the vendor init frames** (`71 00 …Z1D`, `71 01 …timestamp`) before the
-   status query, if the capture shows KS Fit doing so.
-6. **Consider a firmware update through KS Fit** and re-read `2A28`. If the belt moves off
+5. **Consider a firmware update through KS Fit** and re-read `2A28`. If the belt moves off
    V0.0.6, the plain FTMS path may simply start working, as it does for other owners.
 
 ## References

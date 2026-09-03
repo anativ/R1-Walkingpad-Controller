@@ -1773,8 +1773,9 @@ func ftmsSetupIsStaggeredAndEndsWithRequestControl() throws {
                          FTMSDialect.controlPointUUID, FTMSDialect.treadmillDataUUID,
                          FTMSDialect.supplementNotifyUUID, FTMSDialect.textNotifyUUID],
           "the vendor app's subscription order, then the vendor channels")
-    check(steps.contains(.handshake(budget: 10)), "the text handshake has its place and its deadline")
-    let handshakeIndex = try require(steps.firstIndex(of: .handshake(budget: 10)))
+    check(steps.contains { if case .handshake = $0 { return true }; return false },
+          "the text handshake has its place and its deadline")
+    let handshakeIndex = try require(steps.firstIndex { if case .handshake = $0 { return true }; return false })
     let textSubscribeIndex = try require(steps.firstIndex(of: .subscribe(FTMSDialect.textNotifyUUID, pauseAfter: 0.3)))
     check(textSubscribeIndex < handshakeIndex, "subscribed before the belt is asked anything")
     check(steps.contains(.read(FTMSDialect.speedRangeUUID)))
@@ -1869,12 +1870,31 @@ func ftmsWakesTheBeltOverTheVendorServiceBeforeControl() throws {
     check(!z1.requiredCharacteristicUUIDs.contains(FTMSDialect.supplementWriteUUID),
           "a belt without the vendor service must still connect")
 
-    // Setup: wake after the subscriptions, then query status, then request control — in that order.
+    check(FTMS.Supplement.initDeviceBytes == [0x71, 0x00, 0x05, 0x64, 0x91, 0x5A, 0x31, 0x44, 0x3A],
+          "model frame is 71 00 … Z1D plus checksum")
+    let stamped = FTMS.Supplement.initTimestampBytes(now: Date(timeIntervalSince1970: 1_800_000_000))
+    check(stamped[0] == 0x71 && stamped[1] == 0x01 && stamped[2] == 0x08)
+    check(Array(stamped[3...6]) == [0x00, 0xD2, 0x49, 0x6B], "unix time little-endian")
+    check(Array(stamped[7...10]) == FTMS.Supplement.initTimestampTrailer)
+    check(stamped.last == UInt8(stamped.dropLast().reduce(0) { $0 + Int($1) } & 0xFF))
+
+    // Setup: identify the model, sync time, wake, query, then request control — in that order.
     let steps = z1.setupSteps
+    func vendorWriteIndex(_ bytes: [UInt8]) throws -> Int {
+        try require(steps.firstIndex {
+            if case .write(let w) = $0 { return w.bytes == bytes && w.withoutResponse }; return false
+        })
+    }
+    let initIndex = try vendorWriteIndex(FTMS.Supplement.initDeviceBytes)
+    let stampIndex = try require(steps.firstIndex {
+        if case .write(let w) = $0 { return w.bytes.count >= 3 && w.bytes[0] == 0x71 && w.bytes[1] == 0x01 && w.withoutResponse }; return false
+    })
     let wakeIndex = try require(steps.firstIndex(of: .write(FTMSDialect.wake)))
-    let queryIndex = try require(steps.firstIndex(of: .write(BeltWrite(characteristic: FTMSDialect.supplementWriteUUID, bytes: FTMS.Supplement.queryStatusBytes))))
+    let queryIndex = try vendorWriteIndex(FTMS.Supplement.queryStatusBytes)
     let controlIndex = try require(steps.firstIndex(of: .write(BeltWrite(characteristic: FTMSDialect.controlPointUUID, bytes: [0x00]))))
-    check(wakeIndex < queryIndex && queryIndex < controlIndex, "wake, ask, then request control")
+    check(initIndex < stampIndex && stampIndex < wakeIndex && wakeIndex < queryIndex && queryIndex < controlIndex,
+          "identify, time, wake, ask, then request control")
+    check(FTMSDialect.wake.withoutResponse, "the Swift SDK writes this channel as a Write Command")
     check(steps.contains(.subscribe(FTMSDialect.supplementNotifyUUID, pauseAfter: 0.3)),
           "replies are subscribed so they reach the log")
     check(!steps.contains { if case .write(let w) = $0 { return w.bytes == FTMS.Supplement.sleepBytes }; return false },
@@ -1895,6 +1915,11 @@ func ftmsWakesTheBeltOverTheVendorServiceBeforeControl() throws {
     check(FTMS.Supplement.describe([0x01, 0x02]).hasPrefix("Supplement reply"))
     let reply = z1.decode(characteristic: FTMSDialect.supplementNotifyUUID, bytes: wlr, now: Date())
     check(reply.contains { if case .note(let text, _) = $0 { return text.contains("Belt status") }; return false })
+    check(reply.contains { if case .status(let s) = $0 { return s.isMoving && s.speedRaw == 35 && s.elapsed == 554 && s.distanceRaw == 123 }; return false },
+          "a WLR report becomes the same PadStatus the rest of the app runs on")
+    check(z1.usesVendorStatus && z1.pollsForStatus)
+    check(z1.encode(.askStats)?.bytes == FTMS.Supplement.queryStatusBytes)
+    check(z1.encode(.start)?.characteristic == FTMSDialect.controlPointUUID, "control stays on FTMS until the text handshake finishes")
 
     // A frame the parser cannot read is logged (a few times), never dropped in silence.
     let bad = z1.decode(characteristic: FTMSDialect.treadmillDataUUID, bytes: [0x04], now: Date())
@@ -2085,4 +2110,43 @@ func z1DialectSwitchesToTheTextChannelAfterTheHandshake() throws {
     // A new connection starts over.
     z1.resetConnectionState()
     check(!z1.usesTextProtocol && !z1.pollsForStatus)
+}
+
+/// Firmware that never grew the v6 `…0E00`/`…0F00` pair still has the supplement notify/write
+/// characteristics. The handshake must run there, and a `WLR` frame on that notify char is still
+/// a status, not a failed text decode.
+func z1DialectFallsBackToTheSupplementPairForTheTextHandshake() throws {
+    let beltTable = KSText.tables[0]
+    func reply(_ text: String) -> [UInt8] { KSText.encode(text, table: beltTable) }
+    let now = Date()
+
+    let z1 = FTMSDialect()
+    z1.didDiscover(characteristics: [FTMSDialect.controlPointUUID, FTMSDialect.treadmillDataUUID,
+                                      FTMSDialect.supplementNotifyUUID, FTMSDialect.supplementWriteUUID])
+    let opening = z1.beginHandshake(now: now)
+    check(opening.contains { if case .note(let t, _) = $0 { return t.contains("supplement") }; return false })
+    guard let sendEvent = opening.first(where: { if case .send = $0 { return true }; return false }),
+          case .send(let writes, _) = sendEvent else { fail("handshake must start with writes"); return }
+    check(writes.allSatisfy { $0.characteristic == FTMSDialect.supplementWriteUUID && $0.withoutResponse })
+
+    // Dedicated pair, when present, wins.
+    let dedicated = FTMSDialect()
+    dedicated.didDiscover(characteristics: [FTMSDialect.controlPointUUID, FTMSDialect.treadmillDataUUID,
+                                             FTMSDialect.supplementNotifyUUID, FTMSDialect.supplementWriteUUID,
+                                             FTMSDialect.textNotifyUUID, FTMSDialect.textWriteUUID])
+    guard let dedicatedSend = dedicated.beginHandshake(now: now).first(where: { if case .send = $0 { return true }; return false }),
+          case .send(let dedicatedWrites, _) = dedicatedSend else { fail("dedicated handshake must start with writes"); return }
+    check(dedicatedWrites.allSatisfy { $0.characteristic == FTMSDialect.textWriteUUID })
+    check(dedicated.setupSteps.contains(.handshake(budget: 10)))
+    check(z1.setupSteps.contains(.handshake(budget: 4)), "a missing v6 pair gets a shorter wait")
+
+    // Text replies on the supplement notify complete the handshake; a WLR on the same char is
+    // still parsed as binary status and does not get stuffed into the text buffer.
+    let first = z1.decode(characteristic: FTMSDialect.supplementNotifyUUID, bytes: reply("format error"), now: now)
+    check(first.contains { if case .send = $0 { return true }; return false })
+    var wlr: [UInt8] = Array("WLR".utf8) + [UInt8](repeating: 0, count: 21) + Array("AT".utf8)
+    wlr[5] = 20
+    let binary = z1.decode(characteristic: FTMSDialect.supplementNotifyUUID, bytes: wlr, now: now)
+    check(binary.contains { if case .status(let s) = $0 { return s.speedRaw == 20 }; return false })
+    check(!z1.usesTextProtocol, "a WLR report does not finish the text handshake")
 }

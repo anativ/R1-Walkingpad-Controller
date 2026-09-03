@@ -48,9 +48,9 @@ public enum FTMS {
     /// characteristic with ASCII-tagged frames: `WLR` (status report, 26 bytes), `WLV` (ack),
     /// `WLU` (init / version), `WLQ` (query). Layout from kkz6/WalkingPadSDK, tested on a KS-HD-Z1D.
     ///
-    /// The command that matters: **wake**. A Z1 in standby ignores the Fitness Machine Service
-    /// completely — no notifications, no replies, commands silently dropped — until it is woken,
-    /// which the vendor app does over this channel before anything else.
+    /// Wake alone was not enough on firmware V0.0.6. The Swift SDK that drives a `KS-HD-Z1D`
+    /// first identifies the model (`71 00 …Z1D`) and syncs a timestamp (`71 01 …`) before it
+    /// queries, and it writes this channel without a GATT response. We do the same, then wake.
     public enum Supplement {
         public static let serviceUUID = "24E2521C-F63B-48ED-85BE-C5330A00FDF7"
         public static let notifyUUID = "24E2521C-F63B-48ED-85BE-C5330B00FDF7"
@@ -62,6 +62,22 @@ public enum FTMS {
             return bytes
         }
 
+        /// Model identifier: `71 00 05 64 91 5A 31 44 …`. Payload is two opaque bytes plus ASCII
+        /// `Z1D` — the BLE name of the belt under test.
+        public static let initDeviceBytes: [UInt8] = frame(0x71, 0x00, [0x64, 0x91, 0x5A, 0x31, 0x44])
+        /// Trailing four bytes of the timestamp frame, as the Swift SDK sends them.
+        public static let initTimestampTrailer: [UInt8] = [0x32, 0xF6, 0x59, 0x00]
+        /// Timestamp sync: `71 01 08` + little-endian unix time + trailer + checksum.
+        public static func initTimestampBytes(now: Date = Date()) -> [UInt8] {
+            let ts = UInt32(now.timeIntervalSince1970)
+            let tsBytes: [UInt8] = [
+                UInt8(ts & 0xFF),
+                UInt8((ts >> 8) & 0xFF),
+                UInt8((ts >> 16) & 0xFF),
+                UInt8((ts >> 24) & 0xFF),
+            ]
+            return frame(0x71, 0x01, tsBytes + initTimestampTrailer)
+        }
         /// Wake the belt from standby: `72 01 03 0A 00 00 80`.
         public static let wakeBytes: [UInt8] = frame(0x72, 0x01, [0x0A, 0x00, 0x00])
         /// Put the belt into standby: `72 01 03 0A 40 00 C0`. Not sent by this app; documented so
@@ -71,6 +87,26 @@ public enum FTMS {
         public static let queryStatusBytes: [UInt8] = frame(0x72, 0x00)
         /// Ask for the configuration: `75 00 00 75`.
         public static let queryConfigBytes: [UInt8] = frame(0x75, 0x00)
+
+        /// A `WLR` status report as the rest of the app understands it. Distance on the wire is
+        /// metres; `PadStatus` stores 10 m units.
+        public static func parseStatus(_ bytes: [UInt8], now: Date) -> PadStatus? {
+            guard bytes.count >= 12, bytes[0] == 0x57, bytes[1] == 0x4C, bytes[2] == 0x52 else { return nil }
+            let speedRaw = bytes[5]
+            let metres = Int(bytes[9]) | (Int(bytes[10]) << 8) | (Int(bytes[11]) << 16)
+            return PadStatus(
+                beltState: bytes[3] == 0 ? .stopped : .running,
+                speedRaw: speedRaw,
+                modeRaw: PadMode.manual.rawValue,
+                elapsed: Int(bytes[7]) | (Int(bytes[8]) << 8),
+                distanceRaw: metres / 10,
+                steps: 0,
+                appSpeedRaw: UInt8(min(255, Int(speedRaw) * 3)),
+                controllerButton: 0,
+                raw: bytes,
+                receivedAt: now
+            )
+        }
 
         /// A one-line reading of a reply frame, for the log.
         public static func describe(_ bytes: [UInt8]) -> String {

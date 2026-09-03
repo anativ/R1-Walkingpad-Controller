@@ -104,6 +104,12 @@ services at once and picked the protocol from whatever answered, with no user-fa
   on FTMS. The codec, the greeting and the switch-over are covered by `padctl selftest` against a
   simulated belt; only a real Z1F can confirm the firmware speaks it. The Diagnostics "Copy"
   button exists so that answer can travel from whoever has the belt to whoever has the code.
+- **Wake-only still produced silence, so bring-up now matches the Swift SDK's vendor channel
+  more closely.** Before wake it sends the model identifier (`71 00 …Z1D`) and a timestamp
+  (`71 01 …`), writes that channel as a GATT Write Command, and turns a `WLR` report into a
+  `PadStatus` so a belt that answers there is actually driven. If the v6 `…0E00`/`…0F00` pair is
+  missing, the same text handshake is tried on the supplement `…0B00`/`…0D00` pair the Z1F
+  already confirmed — that pair is the only vendor channel V0.0.6 is known to have.
 - Existing users see one new setting, defaulted to what they had.
 - Belt-side preferences, modes and the stored-session card do not exist for the Z1 family. The
   Z1's own vendor "supplement" service could carry some of them and is a candidate for later.
