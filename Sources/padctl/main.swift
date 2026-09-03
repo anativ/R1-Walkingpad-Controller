@@ -84,7 +84,7 @@ let allChecks: [(String, () throws -> Void)] = [
     ("belt family is remembered and explained", beltFamilyIsRememberedAndExplained),
     ("belt-reported range tightens the ceiling", beltReportedRangeTightensTheCeiling),
     ("wire clamp applies every limit and only lowers", wireClampAppliesEveryLimitAndOnlyLowers),
-    ("ftms handshakes on the supplement service before control", ftmsHandshakesOnTheSupplementServiceBeforeControl),
+    ("ftms wakes the belt over the vendor service before control", ftmsWakesTheBeltOverTheVendorServiceBeforeControl),
     ("verbose log follows the family unless overridden", verboseLogFollowsTheFamilyUnlessOverridden),
 ]
 

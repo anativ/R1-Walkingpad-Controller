@@ -190,8 +190,10 @@ public final class FTMSDialect: BeltDialect {
     /// characteristic the belt lacks are skipped by the controller, so this is harmless elsewhere.
     ///
     /// The order follows the vendor app's connection sequence as decompiled: capability reads,
-    /// then the FTMS subscriptions, then the supplement channel, then device info, then the
-    /// handshake, then request control.
+    /// then the FTMS subscriptions, then the supplement channel, then device info — and then the
+    /// one thing the standard-FTMS libraries that fail on a sleeping Z1 never do: wake it over the
+    /// vendor channel before requesting control. A status query follows so the belt's own report
+    /// lands in the log. Steps whose characteristic the belt lacks are skipped by the controller.
     public var setupSteps: [BeltSetupStep] {
         [
             .read(FTMSDialect.featureUUID),
@@ -202,22 +204,23 @@ public final class FTMSDialect: BeltDialect {
             .subscribe(FTMSDialect.treadmillDataUUID, pauseAfter: 0.3),
             .subscribe(FTMSDialect.supplementNotifyUUID, pauseAfter: 0.3),
             .read(FTMSDialect.softwareRevisionUUID),
-            .write(FTMSDialect.handshake),
-            .write(BeltWrite(characteristic: FTMSDialect.supplementWriteUUID, bytes: FTMS.Supplement.propertyListBareBytes)),
+            .write(FTMSDialect.wake),
+            .write(BeltWrite(characteristic: FTMSDialect.supplementWriteUUID, bytes: FTMS.Supplement.queryStatusBytes)),
             .write(BeltWrite(characteristic: FTMSDialect.controlPointUUID, bytes: FTMS.requestControlBytes)),
         ]
     }
 
-    /// The property-list request the vendor app sends before every Control Point command.
-    public static let handshake = BeltWrite(
-        characteristic: FTMSDialect.supplementWriteUUID, bytes: FTMS.Supplement.propertyListBytes
+    /// The vendor wake frame. Harmless on a belt that is already awake.
+    public static let wake = BeltWrite(
+        characteristic: FTMSDialect.supplementWriteUUID, bytes: FTMS.Supplement.wakeBytes
     )
 
-    /// Re-sent before each command, exactly as the vendor app does. Whether once at connect
-    /// would suffice is unknown; matching the app is the conservative choice.
+    /// A start may come long after connecting, and the belt may have dozed off again in between,
+    /// so it is woken once more right before. Speed and stop are left alone: a belt that is
+    /// moving is awake by definition, and a stop must not be delayed by anything.
     public func preamble(for command: PadCommand) -> BeltWrite? {
         switch command {
-        case .start, .setSpeed: return FTMSDialect.handshake
+        case .start: return FTMSDialect.wake
         default: return nil
         }
     }
@@ -292,10 +295,7 @@ public final class FTMSDialect: BeltDialect {
             return [.speedRange(range), .note(range.description, isWarning: false)]
 
         case FTMSDialect.supplementNotifyUUID:
-            // Not decoded yet — but every reply lands in the log, which is how the handshake
-            // gets understood once a real belt has answered it.
-            return [.note("Supplement reply: " + bytes.map { String(format: "%02x", $0) }.joined(separator: " "),
-                          isWarning: false)]
+            return [.note(FTMS.Supplement.describe(bytes), isWarning: false)]
 
         default:
             return [.unknown(bytes)]

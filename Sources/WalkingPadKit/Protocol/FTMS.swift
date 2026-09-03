@@ -41,20 +41,56 @@ public enum FTMS {
 
     // MARK: KingSmith supplement service (KS-HD-* belts)
 
-    /// The vendor channel beside FTMS on the Z1 generation. The KS Fit app asks it for the belt's
-    /// property list before every Control Point command, and the firmware refuses control until
-    /// it has seen that request at least once (mcdax/walkingpad-controller, KS Fit decompilation).
+    /// The vendor channel beside FTMS on the Z1 generation (KS-HD-* belts).
+    ///
+    /// Frames to the belt are `[type, sub-command, payload length, payload…, checksum]` with the
+    /// checksum the low byte of the sum of everything before it. The belt answers on the notify
+    /// characteristic with ASCII-tagged frames: `WLR` (status report, 26 bytes), `WLV` (ack),
+    /// `WLU` (init / version), `WLQ` (query). Layout from kkz6/WalkingPadSDK, tested on a KS-HD-Z1D.
+    ///
+    /// The command that matters: **wake**. A Z1 in standby ignores the Fitness Machine Service
+    /// completely — no notifications, no replies, commands silently dropped — until it is woken,
+    /// which the vendor app does over this channel before anything else.
     public enum Supplement {
         public static let serviceUUID = "24E2521C-F63B-48ED-85BE-C5330A00FDF7"
         public static let notifyUUID = "24E2521C-F63B-48ED-85BE-C5330B00FDF7"
         public static let writeUUID = "24E2521C-F63B-48ED-85BE-C5330D00FDF7"
-        /// "Request all properties", as captured on the wire from the vendor app. The same frame
-        /// builder serves the MC-21's ODM channel and the KS-HD supplement channel.
-        public static let propertyListBytes: [UInt8] = [0x01, 0x00, 0x0D, 0x00, 0x06, 0x0B, 0x0F, 0x0D]
-        /// The same request as the decompiled builder literally produces it: body `20 00 00 00`
-        /// plus a one-byte checksum. Which of the two the KS-HD firmware wants is unknown, so
-        /// bring-up sends both and logs whatever comes back.
-        public static let propertyListBareBytes: [UInt8] = [0x20, 0x00, 0x00, 0x00, 0x20]
+
+        public static func frame(_ type: UInt8, _ sub: UInt8, _ payload: [UInt8] = []) -> [UInt8] {
+            var bytes: [UInt8] = [type, sub, UInt8(payload.count)] + payload
+            bytes.append(UInt8(bytes.reduce(0) { $0 + Int($1) } & 0xFF))
+            return bytes
+        }
+
+        /// Wake the belt from standby: `72 01 03 0A 00 00 80`.
+        public static let wakeBytes: [UInt8] = frame(0x72, 0x01, [0x0A, 0x00, 0x00])
+        /// Put the belt into standby: `72 01 03 0A 40 00 C0`. Not sent by this app; documented so
+        /// nobody mistakes it for the wake frame — one byte apart.
+        public static let sleepBytes: [UInt8] = frame(0x72, 0x01, [0x0A, 0x40, 0x00])
+        /// Ask for a status report (`WLR` reply): `72 00 00 72`.
+        public static let queryStatusBytes: [UInt8] = frame(0x72, 0x00)
+        /// Ask for the configuration: `75 00 00 75`.
+        public static let queryConfigBytes: [UInt8] = frame(0x75, 0x00)
+
+        /// A one-line reading of a reply frame, for the log.
+        public static func describe(_ bytes: [UInt8]) -> String {
+            let hex = bytes.map { String(format: "%02x", $0) }.joined(separator: " ")
+            guard bytes.count >= 3, bytes[0] == 0x57, bytes[1] == 0x4C else { return "Supplement reply: \(hex)" }
+            switch bytes[2] {
+            case 0x52 where bytes.count >= 12:
+                let belt = bytes[3]
+                let speed = bytes[5]
+                let time = Int(bytes[7]) | (Int(bytes[8]) << 8)
+                let distance = Int(bytes[9]) | (Int(bytes[10]) << 8) | (Int(bytes[11]) << 16)
+                return String(format: "Belt status (WLR): belt byte %d (%@), speed %.1f km/h, %ds, %dm — %@",
+                              belt, belt == 0 ? "idle" : "running", Double(speed) / 10, time, distance, hex)
+            case 0x52: return "Belt status (WLR, short): \(hex)"
+            case 0x56: return "Belt ack (WLV): \(hex)"
+            case 0x55: return "Belt init/version (WLU): \(hex)"
+            case 0x51: return "Belt query (WLQ): \(hex)"
+            default: return "Belt frame WL\(String(UnicodeScalar(bytes[2]))): \(hex)"
+            }
+        }
     }
 
     // MARK: Control Point opcodes

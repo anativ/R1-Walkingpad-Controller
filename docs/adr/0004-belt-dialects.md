@@ -83,13 +83,17 @@ services at once and picked the protocol from whatever answered, with no user-fa
   wire the moment the target does go out.
 - A belt that pushes status is watched: ten seconds of silence on a moving belt drops the link
   and the reconnect logic takes over, so a stalled stream never shows as a running belt.
-- **The Z1F refused every Control Point command on the first hardware test** (connected, live
-  data, no response to start). The same failure is on record for another Z1F in the reference
-  project, unresolved there. The decompiled vendor app writes a "property list" request to the
-  belt's supplement service before each command, which the firmware treats as the handshake
-  that unlocks control. The dialect now does the same, on setup and before every command, and
-  logs the replies raw. Unverified until the belt answers; the Diagnostics "Copy" button exists
-  so that answer can travel from whoever has the belt to whoever has the code.
+- **The Z1F refused every Control Point command on the first hardware tests**: connected,
+  every read fine, every notification confirmed on, and then not one byte from the belt on any
+  channel. The same failure is on record for another Z1F (firmware V0.0.6, identical feature
+  bits) in the reference Python project. Meanwhile three other projects drive a KS-HD-Z1D with
+  plain FTMS, and the Swift one among them carries a proprietary **wake** frame for the vendor
+  service. The reading that fits every fact: a Z1 in standby ignores FTMS entirely until woken,
+  and the vendor app wakes it first. The dialect now sends the wake frame during bring-up and
+  before every start, queries a status report, and decodes the belt's `WL…` replies for the log.
+  The earlier "property list" guess (an MC-21 frame) drew no reply and is gone. Still unverified
+  until a Z1F answers; the Diagnostics "Copy" button exists so that answer can travel from
+  whoever has the belt to whoever has the code.
 - Existing users see one new setting, defaulted to what they had.
 - Belt-side preferences, modes and the stored-session card do not exist for the Z1 family. The
   Z1's own vendor "supplement" service could carry some of them and is a candidate for later.

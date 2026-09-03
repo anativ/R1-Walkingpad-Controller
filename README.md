@@ -435,10 +435,11 @@ all handled:
   the speed is held until the belt reports movement, then for two more seconds, then sent.
 - **Request control is often refused** with "operation failed", yet the commands that follow
   are honoured. The refusal is logged and ignored.
-- **The belt ignores every Control Point command until it has been asked for its property
-  list** on KingSmith's vendor "supplement" service (`24e2521c-…`). The KS Fit app sends that
-  request before each command; so does this app, after the subscriptions and before every
-  start, stop and speed change. Replies are shown raw in Diagnostics.
+- **A belt in standby ignores FTMS entirely** — no notifications, no replies, commands dropped
+  without a word — until it is woken over KingSmith's vendor service (`24e2521c-…`), which the
+  KS Fit app does before anything else. This app sends the wake frame after subscribing and
+  again before every start, asks the belt for a status report, and shows the vendor replies
+  decoded in Diagnostics.
 
 The belt also reports its supported speed range (`2AD4`), which the app treats as a hard limit
 on top of its own ceiling.

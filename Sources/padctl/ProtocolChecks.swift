@@ -1850,40 +1850,46 @@ func wireClampAppliesEveryLimitAndOnlyLowers() throws {
     check(PadController.wireSpeed(0, ceilingRaw: 30, beltMaxKph: 6) == 0, "stop is always allowed")
 }
 
-/// A Z1F refuses every Control Point command until the vendor "supplement" service has been asked
-/// for the belt's property list — the KS Fit app does it before each command. So does the dialect.
-func ftmsHandshakesOnTheSupplementServiceBeforeControl() throws {
+/// A Z1 in standby ignores FTMS entirely until it is woken over KingSmith's vendor service, which
+/// is what the vendor app does first. The dialect wakes it during bring-up and again before start.
+func ftmsWakesTheBeltOverTheVendorServiceBeforeControl() throws {
     let z1 = FTMSDialect()
-    check(FTMS.Supplement.propertyListBytes == [0x01, 0x00, 0x0D, 0x00, 0x06, 0x0B, 0x0F, 0x0D],
-          "the on-wire frame captured from the vendor app")
-    check(z1.serviceUUIDs.contains(FTMSDialect.supplementServiceUUID), "the supplement service is discovered")
-    check(z1.characteristicUUIDs.contains(FTMSDialect.supplementWriteUUID))
-    check(z1.characteristicUUIDs.contains(FTMSDialect.supplementNotifyUUID))
+    // Frame layout and checksum, against the values the reference SDK tests pin down.
+    check(FTMS.Supplement.wakeBytes == [0x72, 0x01, 0x03, 0x0A, 0x00, 0x00, 0x80])
+    check(FTMS.Supplement.sleepBytes == [0x72, 0x01, 0x03, 0x0A, 0x40, 0x00, 0xC0])
+    check(FTMS.Supplement.queryStatusBytes == [0x72, 0x00, 0x00, 0x72])
+    check(FTMS.Supplement.queryConfigBytes == [0x75, 0x00, 0x00, 0x75])
+    check(FTMS.Supplement.wakeBytes != FTMS.Supplement.sleepBytes, "one byte apart — never confuse them")
+    check(z1.serviceUUIDs.contains(FTMSDialect.supplementServiceUUID), "the vendor service is discovered")
     check(!z1.requiredCharacteristicUUIDs.contains(FTMSDialect.supplementWriteUUID),
           "a belt without the vendor service must still connect")
 
-    // Setup: the handshake goes out after the subscriptions and before request-control.
+    // Setup: wake after the subscriptions, then query status, then request control — in that order.
     let steps = z1.setupSteps
-    let handshakeIndex = try require(steps.firstIndex(of: .write(FTMSDialect.handshake)))
+    let wakeIndex = try require(steps.firstIndex(of: .write(FTMSDialect.wake)))
+    let queryIndex = try require(steps.firstIndex(of: .write(BeltWrite(characteristic: FTMSDialect.supplementWriteUUID, bytes: FTMS.Supplement.queryStatusBytes))))
     let controlIndex = try require(steps.firstIndex(of: .write(BeltWrite(characteristic: FTMSDialect.controlPointUUID, bytes: [0x00]))))
-    check(handshakeIndex < controlIndex, "identify first, then ask for control")
+    check(wakeIndex < queryIndex && queryIndex < controlIndex, "wake, ask, then request control")
     check(steps.contains(.subscribe(FTMSDialect.supplementNotifyUUID, pauseAfter: 0.3)),
           "replies are subscribed so they reach the log")
+    check(!steps.contains { if case .write(let w) = $0 { return w.bytes == FTMS.Supplement.sleepBytes }; return false },
+          "the app never puts the belt to sleep")
 
-    // Before each command that drives the belt, and only those.
-    check(z1.preamble(for: .start) == FTMSDialect.handshake)
-    check(z1.preamble(for: .setSpeed(30)) == FTMSDialect.handshake)
-    check(z1.preamble(for: .setSpeed(0)) == FTMSDialect.handshake, "stop counts too")
-    check(z1.preamble(for: .askStats) == nil)
+    // Start wakes the belt again; nothing else is delayed by a preamble.
+    check(z1.preamble(for: .start) == FTMSDialect.wake)
+    check(z1.preamble(for: .setSpeed(30)) == nil)
+    check(z1.preamble(for: .setSpeed(0)) == nil, "a stop is never held behind another write")
     check(ClassicDialect().preamble(for: .start) == nil, "the classic belt has no such thing")
 
-    // Whatever the belt answers is surfaced verbatim.
-    let reply = z1.decode(characteristic: FTMSDialect.supplementNotifyUUID, bytes: [0x01, 0x02, 0xAB], now: Date())
-    check(reply.contains { if case .note(let text, _) = $0 { return text.contains("01 02 ab") }; return false })
-
-    // Both known spellings of the property-list request go out during bring-up.
-    check(steps.contains(.write(BeltWrite(characteristic: FTMSDialect.supplementWriteUUID,
-                                          bytes: FTMS.Supplement.propertyListBareBytes))))
+    // Replies are decoded for the log: a WLR status report and an ack.
+    var wlr: [UInt8] = Array("WLR".utf8) + [UInt8](repeating: 0, count: 21) + Array("AT".utf8)
+    wlr[3] = 1; wlr[5] = 35; wlr[7] = 0x2A; wlr[8] = 0x02; wlr[9] = 0xD2; wlr[10] = 0x04; wlr[11] = 0x00
+    let described = FTMS.Supplement.describe(wlr)
+    check(described.contains("running") && described.contains("3.5 km/h") && described.contains("554s") && described.contains("1234m"), described)
+    check(FTMS.Supplement.describe(Array("WLV".utf8) + [0, 0]).hasPrefix("Belt ack"))
+    check(FTMS.Supplement.describe([0x01, 0x02]).hasPrefix("Supplement reply"))
+    let reply = z1.decode(characteristic: FTMSDialect.supplementNotifyUUID, bytes: wlr, now: Date())
+    check(reply.contains { if case .note(let text, _) = $0 { return text.contains("Belt status") }; return false })
 
     // A frame the parser cannot read is logged (a few times), never dropped in silence.
     let bad = z1.decode(characteristic: FTMSDialect.treadmillDataUUID, bytes: [0x04], now: Date())
