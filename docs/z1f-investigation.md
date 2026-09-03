@@ -156,3 +156,152 @@ safety gaps unrelated to the Z1F, where a speed above the ceiling could have rea
 - jrosskopf/padctl — plain FTMS verified on a `KS-HD-Z1D`; a real Treadmill Data capture
 - raine/WalkingMate and TreadmillTrace — Z1 support added after user reports; probe tool
 - ph4r05/ph4-walkingpad — the classic protocol this app was built on
+
+## Appendix — every log received, verbatim
+
+All from the owner's Mac, 3 September 2026, local time. Nothing edited except the note, which
+is translated from Hebrew.
+
+### 1. v1.1 — screenshot of the Diagnostics panel (15:28)
+
+Header showed "No status frame received yet." Visible tail of the event log:
+
+```
+3:28:10 PM  TX 07
+3:28:11 PM  Holding 2.5 km/h until the belt is moving
+3:28:12 PM  TX 07
+3:28:13 PM  Holding 3.0 km/h until the belt is moving
+3:28:14 PM  TX 07
+3:28:15 PM  Holding 3.5 km/h until the belt is moving
+3:28:15 PM  TX 08 01
+3:28:19 PM  Belt did not confirm 0.0 km/h — it may be stopped, in automatic mode, or
+            outside the belt's own speed range
+```
+
+The owner's note with it (translated): *"I found the failure in the code: the app marks
+'connected' immediately after discovering the characteristics, before macOS confirms that the
+FTMS notifications are active. The control request 00 is also sent too early and is not
+logged. The result matches the screenshot exactly: no RX, no status, and every 07 is silently
+rejected."* — The timing point was right and was fixed in v1.2. The request-control write was
+in fact logged (`TX 00`), above the visible part of the panel.
+
+### 2. v1.1 — `log show` excerpt, same session (15:28)
+
+Run without `--debug`, so command bytes are absent:
+
+```
+2026-09-03 15:28:11.451 Df WalkingPad[55431:af1418] [io.nativ.walkingpad:ble] Holding 2.5 km/h until the belt is moving
+2026-09-03 15:28:13.155 Df WalkingPad[55431:af1418] [io.nativ.walkingpad:ble] Holding 3.0 km/h until the belt is moving
+2026-09-03 15:28:15.026 Df WalkingPad[55431:af1418] [io.nativ.walkingpad:ble] Holding 3.5 km/h until the belt is moving
+2026-09-03 15:28:19.147 E  WalkingPad[55431:af1418] [io.nativ.walkingpad:ble] Belt did not confirm 0.0 km/h — it may be stopped, in automatic mode, or outside the belt's own speed range
+```
+
+### 3. v1.2 — `log show`, full connection (15:45)
+
+First build with confirmation-driven bring-up and the vendor "property list" frames.
+
+```
+2026-09-03 15:45:19.091 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Belt model set to Z1 · Z1F
+2026-09-03 15:45:19.091 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Waiting for Bluetooth to power on
+2026-09-03 15:45:19.390 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:menubar] menu bar item created and rendering
+2026-09-03 15:45:21.061 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Bluetooth ready
+2026-09-03 15:45:21.061 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] state: idle -> scanning
+2026-09-03 15:45:21.061 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Scanning for a Z1 · Z1F (FTMS service)…
+2026-09-03 15:45:21.414 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Found KS-HD-Z1D (-66 dBm)
+2026-09-03 15:45:21.415 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] state: scanning -> connecting("KS-HD-Z1D")
+2026-09-03 15:45:21.617 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Connected, discovering services
+2026-09-03 15:45:21.765 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Notifications on for 2ACD
+2026-09-03 15:45:21.918 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Notifications on for 2ADA
+2026-09-03 15:45:22.187 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Notifications on for 2AD9
+2026-09-03 15:45:22.606 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Notifications on for 24E2521C-F63B-48ED-85BE-C5330B00FDF7
+2026-09-03 15:45:22.965 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Belt speed range 1.0–6.0 km/h in 0.10 km/h steps
+2026-09-03 15:45:23.115 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] state: connecting("KS-HD-Z1D") -> connected("KS-HD-Z1D")
+2026-09-03 15:45:23.115 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Ready — notifications on: 24E2521C-F63B-48ED-85BE-C5330B00FDF7, 2ACD, 2AD9, 2ADA
+2026-09-03 15:45:26.461 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Holding 2.5 km/h until the belt is moving
+2026-09-03 15:45:28.116 E  WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] No status from the belt 5s after connecting — its notifications may not be active. Power-cycle the belt and reconnect; if this repeats, copy this log.
+2026-09-03 15:45:35.961 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Holding 3.0 km/h until the belt is moving
+2026-09-03 15:45:40.972 E  WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Belt did not confirm 0.0 km/h — it may be stopped, in automatic mode, or outside the belt's own speed range
+2026-09-03 15:45:46.795 E  WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Belt did not confirm 0.0 km/h — it may be stopped, in automatic mode, or outside the belt's own speed range
+2026-09-03 15:45:52.660 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Program “Interval walk” started at 5.8 km/h
+2026-09-03 15:45:53.484 Df WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Holding 5.8 km/h until the belt is moving
+2026-09-03 15:46:08.484 E  WalkingPad[57615:afefed] [io.nativ.walkingpad:ble] Belt did not start moving within 15s, so 5.8 km/h was not sent — check the safety key and that the belt is awake
+```
+
+### 4. v1.4 — Diagnostics "Copy" (16:36)
+
+Firmware and features read for the first time; both known "property list" spellings sent.
+
+```
+WalkingPad diagnostics — belt model: Z1 · Z1F; state: KS-HD-Z1D
+4:36:20 PM  Belt model set to Z1 · Z1F
+4:36:20 PM  Waiting for Bluetooth to power on
+4:36:24 PM  Bluetooth ready
+4:36:24 PM  Scanning for a Z1 · Z1F (FTMS service)…
+4:36:24 PM  Found KS-HD-Z1D (-67 dBm)
+4:36:24 PM  Connected, discovering services
+4:36:24 PM  Machine features 0x00001244, target features 0x00000001
+4:36:24 PM  Belt speed range 1.0–6.0 km/h in 0.10 km/h steps
+4:36:24 PM  Notifications on for 2ADA
+4:36:25 PM  Notifications on for 2AD3
+4:36:25 PM  Notifications on for 2AD9
+4:36:25 PM  Notifications on for 2ACD
+4:36:26 PM  Notifications on for 24E2521C-F63B-48ED-85BE-C5330B00FDF7
+4:36:26 PM  Belt firmware: V0.0.6
+4:36:26 PM  TX 01 00 0d 00 06 0b 0f 0d
+4:36:26 PM  TX 20 00 00 00 20
+4:36:26 PM  TX 00
+4:36:26 PM  Ready — notifications on: 24E2521C-F63B-48ED-85BE-C5330B00FDF7, 2ACD, 2AD3, 2AD9, 2ADA
+4:36:28 PM  TX 07
+4:36:29 PM  Holding 2.5 km/h until the belt is moving
+4:36:31 PM  No status from the belt 5s after connecting — its notifications may not be active. Power-cycle the belt and reconnect; if this repeats, copy this log.
+4:36:35 PM  TX 08 01
+4:36:39 PM  Program “Gentle drift” started at 4.0 km/h
+4:36:39 PM  TX 07
+4:36:39 PM  Belt did not confirm 4.0 km/h — it may be stopped, in automatic mode, or outside the belt's own speed range
+4:36:39 PM  Holding 4.0 km/h until the belt is moving
+4:36:54 PM  Belt did not start moving within 15s, so 4.0 km/h was not sent — check the safety key and that the belt is awake
+4:43:11 PM  Program stopped: stopped by you
+```
+
+### 5. v1.5 — Diagnostics "Copy" (18:12)
+
+Vendor wake and status query instead of the property-list frames.
+
+```
+WalkingPad diagnostics — belt model: Z1 · Z1F; state: KS-HD-Z1D
+6:12:18 PM  Belt model set to Z1 · Z1F
+6:12:18 PM  Waiting for Bluetooth to power on
+6:12:21 PM  Bluetooth ready
+6:12:21 PM  Scanning for a Z1 · Z1F (FTMS service)…
+6:12:21 PM  Found KS-HD-Z1D (-59 dBm)
+6:12:21 PM  Connected, discovering services
+6:12:21 PM  Machine features 0x00001244, target features 0x00000001
+6:12:21 PM  Belt speed range 1.0–6.0 km/h in 0.10 km/h steps
+6:12:21 PM  Notifications on for 2ADA
+6:12:21 PM  Notifications on for 2AD3
+6:12:22 PM  Notifications on for 2AD9
+6:12:22 PM  Notifications on for 2ACD
+6:12:22 PM  Notifications on for 24E2521C-F63B-48ED-85BE-C5330B00FDF7
+6:12:23 PM  Belt firmware: V0.0.6
+6:12:23 PM  TX 72 01 03 0a 00 00 80
+6:12:23 PM  TX 72 00 00 72
+6:12:23 PM  TX 00
+6:12:23 PM  Ready — notifications on: 24E2521C-F63B-48ED-85BE-C5330B00FDF7, 2ACD, 2AD3, 2AD9, 2ADA
+6:12:24 PM  TX 07
+6:12:25 PM  Holding 2.5 km/h until the belt is moving
+6:12:28 PM  No status from the belt 5s after connecting — its notifications may not be active. Power-cycle the belt and reconnect; if this repeats, copy this log.
+6:12:31 PM  TX 07
+6:12:32 PM  TX 07
+6:12:33 PM  Holding 3.5 km/h until the belt is moving
+6:12:36 PM  TX 08 01
+6:12:40 PM  Belt did not confirm 0.0 km/h — it may be stopped, in automatic mode, or outside the belt's own speed range
+```
+
+### What the five logs have in common
+
+Every line is the app talking; not one line is the belt answering. In v1.4 and v1.5 the
+`TX` lines confirm that the vendor frames and the request-control write left the Mac, and the
+absence of any "Write failed" line means the belt acknowledged them at the link layer. The
+reads (`Machine features`, `Belt speed range`, `Belt firmware`) prove the belt's attribute
+table is readable. No `First status frame`, `Unreadable treadmill data frame`, `Belt accepted`,
+`Belt rejected`, `Belt reports`, `Belt status (WLR)` or `Supplement reply` line ever appeared.
