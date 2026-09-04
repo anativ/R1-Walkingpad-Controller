@@ -39,15 +39,18 @@ struct DiagnosticsView: View {
 
             HStack {
                 Text("Event log").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Picker("Bluetooth log", selection: Binding(
+                    get: { app.beltLogMode },
+                    set: { app.setBeltLogMode($0) }
+                )) {
+                    ForEach(BeltLogMode.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 180)
+                .help("Verbose records every command and frame for a diagnostics report. "
+                      + "Normal is quieter. Z1 · Z1F starts on Verbose.")
                 Spacer()
-                Toggle("Verbose", isOn: Binding(
-                    get: { app.isBeltLogVerbose },
-                    set: { app.setBeltLogVerbose($0) }
-                ))
-                .toggleStyle(.checkbox)
-                .controlSize(.small)
-                .help("Log every command and frame at a level `log show` captures without --debug, "
-                      + "and echo a status frame every few seconds. On by default for the Z1 · Z1F.")
                 // The whole exchange, ready to paste into a message: this is how a belt that
                 // "connects but does nothing" gets diagnosed from another Mac.
                 Button("Copy") { copyLog() }.controlSize(.small)
@@ -98,7 +101,7 @@ struct DiagnosticsView: View {
     }
 
     private func copyLog() {
-        let header = "WalkingPad diagnostics — belt model: \(app.padFamily.label); state: "
+        let header = "WalkingPad diagnostics — belt model: \(app.padFamily.label); log: \(app.beltLogMode.label); state: "
             + app.controller.state.label
             + (app.status.map { "; last frame: \($0.hexDump)" } ?? "")
         let lines = app.controller.log.map { entry in

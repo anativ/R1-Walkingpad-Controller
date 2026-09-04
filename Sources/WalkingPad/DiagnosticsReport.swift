@@ -26,7 +26,8 @@ enum DiagnosticsReport {
         lines.append("macOS: \(os)")
         lines.append("")
         lines.append("Belt model setting: \(app.settings.padFamily.label) [\(app.settings.padFamily.rawValue)]")
-        lines.append("Verbose Bluetooth log: \(app.isBeltLogVerbose ? "on" : "off")")
+        lines.append("Bluetooth log: \(app.beltLogMode.label)"
+                     + (app.settings.verboseBeltLog == nil ? " (family default)" : ""))
         lines.append("Speed ceiling: \(String(format: "%.1f km/h", app.effectiveMaxSpeed))"
                      + (app.settings.isRunningMode ? " (run mode)" : ""))
         lines.append("Connection state: \(controller.state.label)")

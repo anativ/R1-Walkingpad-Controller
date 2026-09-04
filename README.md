@@ -357,13 +357,18 @@ few seconds.
 
 ## Sending a diagnostics report
 
-If the belt will not connect, or connects and does nothing, press **Save diagnostics…** — it
-appears next to the Connect button whenever that happens, and is always in the **Belt** menu, in
-the menu-bar item, and at the bottom of Diagnostics. It writes one text file to your Desktop and
-selects it in Finder. Send that file. It contains the app and macOS versions, the belt model
-setting, the connection state, every Bluetooth characteristic the belt exposed, the full event
-log since launch, and the app's system log for the last two hours, so earlier attempts are in
-it too. Nothing personal is in it beyond the belt's Bluetooth name.
+The Bluetooth log has two modes, **Verbose** and **Normal**. Z1 · Z1F starts on Verbose because
+that belt is still being diagnosed; the classic belt starts on Normal. The choice is in
+Settings › General and on the Diagnostics panel, and is remembered.
+
+If the belt will not connect, or connects and does nothing, press **Save diagnostics…** — on
+Verbose (so on a Z1 by default) it sits next to Connect the whole time, and it is always in the
+**Belt** menu, in the menu-bar item, and on the Diagnostics panel, which Verbose opens for you.
+It writes one text file to your Desktop and selects it in Finder. Send that file. It contains
+the app and macOS versions, the belt model setting, the log mode, the connection state, every
+Bluetooth characteristic the belt exposed, the full event log since launch, and the app's
+system log for the last two hours, so earlier attempts are in it too. Nothing personal is in it
+beyond the belt's Bluetooth name.
 
 ## Troubleshooting with padctl
 

@@ -50,8 +50,36 @@ public enum PadFamily: String, CaseIterable, Codable, Sendable, Identifiable {
     /// collect; the classic protocol is settled and its poll chatter is noise.
     public var defaultsToVerboseLog: Bool { self == .ftms }
 
+    /// The log mode this family starts in.
+    public var defaultLogMode: BeltLogMode { defaultsToVerboseLog ? .verbose : .normal }
+
     /// The verbosity in force: the user's remembered choice if they made one, else the family default.
     public static func verboseLog(override: Bool?, family: PadFamily) -> Bool {
         override ?? family.defaultsToVerboseLog
     }
+
+    /// The log mode in force: the user's remembered choice if they made one, else the family default.
+    public static func logMode(override: Bool?, family: PadFamily) -> BeltLogMode {
+        verboseLog(override: override, family: family) ? .verbose : .normal
+    }
+}
+
+/// How much of the Bluetooth exchange is recorded.
+///
+/// Verbose is the Z1 default because that belt is not working yet: every command and frame has
+/// to be in the diagnostics report. Normal is quieter, for a belt whose protocol is settled.
+public enum BeltLogMode: String, CaseIterable, Sendable, Identifiable {
+    case normal
+    case verbose
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .normal: return "Normal"
+        case .verbose: return "Verbose"
+        }
+    }
+
+    public var isVerbose: Bool { self == .verbose }
 }

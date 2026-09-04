@@ -142,6 +142,7 @@ case "selftest":
 case "watch", "speed", "stop":
     let controller = PadController()
     controller.family = family
+    controller.verboseLogging = family.defaultsToVerboseLog
     var targetSpeed: Double?
     if command == "speed" {
         guard arguments.count > 1, let kph = Double(arguments[1]), kph.isFinite else {

@@ -92,6 +92,12 @@ struct WalkingPadApp: App {
                     .keyboardShortcut("k", modifiers: [.command])
                 Button("Reset session metrics") { app.resetSessionMetrics() }
                 Divider()
+                Picker("Bluetooth log", selection: Binding(
+                    get: { app.beltLogMode },
+                    set: { app.setBeltLogMode($0) }
+                )) {
+                    ForEach(BeltLogMode.allCases) { Text($0.label).tag($0) }
+                }
                 Button("Save Diagnostics Report…") { app.saveDiagnosticsReport() }
                     .disabled(app.isSavingDiagnostics)
             }

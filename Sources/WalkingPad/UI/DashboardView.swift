@@ -3,7 +3,9 @@ import WalkingPadKit
 
 struct DashboardView: View {
     @EnvironmentObject private var app: AppModel
-    @State private var showDiagnostics = false
+    /// Nil means follow the log mode: Verbose (the Z1 default) opens Diagnostics so collecting
+    /// a report does not mean hunting for a collapsed panel at the bottom of the page.
+    @State private var showDiagnostics: Bool? = nil
 
     var body: some View {
         ScrollView {
@@ -26,7 +28,7 @@ struct DashboardView: View {
                 if app.padFamily.supportsModes { ModePickerView() }
                 AllTimeSummaryView()
                 if app.padFamily.supportsStoredSession { StoredSessionView() }
-                DisclosureGroup("Diagnostics", isExpanded: $showDiagnostics) {
+                DisclosureGroup("Diagnostics", isExpanded: diagnosticsExpanded) {
                     DiagnosticsView()
                 }
                 .font(.subheadline.weight(.semibold))
@@ -39,6 +41,13 @@ struct DashboardView: View {
         }
         .background(.background)
         .task { app.reapplyDockIconPolicy() }
+    }
+
+    private var diagnosticsExpanded: Binding<Bool> {
+        Binding(
+            get: { showDiagnostics ?? app.isBeltLogVerbose },
+            set: { showDiagnostics = $0 }
+        )
     }
 }
 
@@ -95,8 +104,9 @@ struct ConnectionBar: View {
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 12))
     }
 
-    /// No belt found, or a belt that connected and then never said anything.
+    /// Always on Verbose (the Z1 default), and whenever something is already wrong.
     private var showsDiagnosticsShortcut: Bool {
+        if app.isBeltLogVerbose { return true }
         if case .notFound = app.controller.state { return true }
         return app.isConnected && app.status == nil
     }

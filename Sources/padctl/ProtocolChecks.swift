@@ -1940,6 +1940,11 @@ func verboseLogFollowsTheFamilyUnlessOverridden() throws {
     check(!PadFamily.verboseLog(override: nil, family: .classic), "classic defaults to quiet")
     check(!PadFamily.verboseLog(override: false, family: .ftms), "the user can turn it off on a Z1")
     check(PadFamily.verboseLog(override: true, family: .classic), "or on for a classic belt")
+    check(PadFamily.ftms.defaultLogMode == .verbose && PadFamily.classic.defaultLogMode == .normal)
+    check(PadFamily.logMode(override: nil, family: .ftms) == .verbose)
+    check(PadFamily.logMode(override: false, family: .ftms) == .normal)
+    check(BeltLogMode.allCases.map(\.label) == ["Normal", "Verbose"])
+    check(BeltLogMode.verbose.isVerbose && !BeltLogMode.normal.isVerbose)
 }
 
 // MARK: - KingSmith text protocol (Z1F firmware V0.0.6)

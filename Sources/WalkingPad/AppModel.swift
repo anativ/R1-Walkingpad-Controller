@@ -151,7 +151,10 @@ final class AppModel: ObservableObject {
             if newValue.padFamily != oldValue.padFamily {
                 controller.family = newValue.padFamily
             }
-            controller.verboseLogging = newValue.isBeltLogVerbose
+            if newValue.isBeltLogVerbose != oldValue.isBeltLogVerbose {
+                controller.verboseLogging = newValue.isBeltLogVerbose
+                controller.appendLog("Bluetooth log: \(newValue.isBeltLogVerbose ? BeltLogMode.verbose.label : BeltLogMode.normal.label)", .info)
+            }
             // A Slider whose value sits outside its own range misbehaves, so follow the ceiling down.
             let ceiling = SpeedLimits.effectiveCeiling(
                 walkingCeilingKph: newValue.speedCeilingKph, isRunningMode: newValue.isRunningMode,
@@ -306,6 +309,9 @@ final class AppModel: ObservableObject {
     /// Whether the Bluetooth log is verbose right now.
     var isBeltLogVerbose: Bool { settings.isBeltLogVerbose }
 
+    /// The log mode in force: Verbose or Normal.
+    var beltLogMode: BeltLogMode { PadFamily.logMode(override: settings.verboseBeltLog, family: settings.padFamily) }
+
     /// True while a diagnostics report is being assembled (the system-log read takes a moment).
     @Published var isSavingDiagnostics = false
 
@@ -326,6 +332,10 @@ final class AppModel: ObservableObject {
         var updated = settings
         updated.verboseBeltLog = verbose
         settings = updated
+    }
+
+    func setBeltLogMode(_ mode: BeltLogMode) {
+        setBeltLogVerbose(mode.isVerbose)
     }
 
     // MARK: - Derived view state
