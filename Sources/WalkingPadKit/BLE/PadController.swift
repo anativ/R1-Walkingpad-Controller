@@ -464,6 +464,8 @@ public final class PadController: NSObject, ObservableObject {
         if SpeedGate.shouldHold(
             command, beltIsMoving: status?.isMoving ?? false, dialectHolds: dialect.holdsSpeedUntilBeltMoves
         ), case .setSpeed(let raw) = command {
+            // The held speed supersedes a retry of an older command, just as a sent one does.
+            writeBacklog.removeAll { $0.isRetry }
             heldSpeedRaw = raw
             armHeldSpeedDeadline()
             appendLog(
