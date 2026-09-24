@@ -106,7 +106,8 @@ public enum FTMS {
         public static func unlockBytes(name: String) -> [UInt8]? {
             let tail = Array(name.utf8.suffix(4))
             guard tail.count == 4 else { return nil }
-            let token = (UInt32(tail[0]) | UInt32(tail[1]) << 8 | UInt32(tail[2]) << 16 | UInt32(tail[3]) << 24) &+ 1
+            let name32: UInt32 = tail.reversed().reduce(0) { ($0 << 8) | UInt32($1) }
+            let token = name32 &+ 1
             return frame(0x71, 0x00, [0x01] + littleEndian32(token))
         }
 
@@ -136,9 +137,13 @@ public enum FTMS {
         /// A `72 80` reply: four-byte records `[id, error, value lo, value hi]`. Records with an
         /// error are left out.
         public static func parseProperties(_ data: [UInt8]) -> [(id: UInt8, value: UInt16)] {
-            stride(from: 0, to: data.count - data.count % 4, by: 4).compactMap { i in
-                data[i + 1] == 0 ? (data[i], UInt16(data[i + 2]) | UInt16(data[i + 3]) << 8) : nil
+            var records: [(id: UInt8, value: UInt16)] = []
+            var i = 0
+            while i + 4 <= data.count {
+                if data[i + 1] == 0 { records.append((data[i], word(data[i + 2], data[i + 3]))) }
+                i += 4
             }
+            return records
         }
 
         /// A one-line reading of a reply frame, for the log.
@@ -161,8 +166,11 @@ public enum FTMS {
             case (0x72, 0x81):
                 return "Belt property write answered: \(hex)"
             case (0x72, 0x50):
-                let pushed = stride(from: 0, to: f.data.count - f.data.count % 3, by: 3).map {
-                    (id: f.data[$0], value: UInt16(f.data[$0 + 1]) | UInt16(f.data[$0 + 2]) << 8)
+                var pushed: [(id: UInt8, value: UInt16)] = []
+                var i = 0
+                while i + 3 <= f.data.count {
+                    pushed.append((f.data[i], word(f.data[i + 1], f.data[i + 2])))
+                    i += 3
                 }
                 return "Belt property changed: \(props(pushed))"
             case (0x73, 0x50):
@@ -172,6 +180,10 @@ public enum FTMS {
             default:
                 return "Vendor reply: \(hex)"
             }
+        }
+
+        private static func word(_ lo: UInt8, _ hi: UInt8) -> UInt16 {
+            UInt16(lo) | (UInt16(hi) << 8)
         }
 
         private static func littleEndian32(_ value: UInt32) -> [UInt8] {
