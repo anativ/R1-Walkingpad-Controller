@@ -84,13 +84,14 @@ let allChecks: [(String, () throws -> Void)] = [
     ("belt family is remembered and explained", beltFamilyIsRememberedAndExplained),
     ("belt-reported range tightens the ceiling", beltReportedRangeTightensTheCeiling),
     ("wire clamp applies every limit and only lowers", wireClampAppliesEveryLimitAndOnlyLowers),
-    ("ftms wakes the belt over the vendor service before control", ftmsWakesTheBeltOverTheVendorServiceBeforeControl),
+    ("ftms unlocks the z1 before anything else", ftmsUnlocksTheZ1BeforeAnythingElse),
+    ("ftms retries a command refused for lack of control", ftmsRetriesACommandRefusedForLackOfControl),
     ("verbose log follows the family unless overridden", verboseLogFollowsTheFamilyUnlessOverridden),
     ("ks text encodes and decodes with every table", ksTextEncodesAndDecodesWithEveryTable),
     ("ks text props become a status", ksTextPropsBecomeAStatus),
     ("ks text handshake learns the table and completes", ksTextHandshakeLearnsTheTableAndCompletes),
     ("z1 dialect switches to the text channel after the handshake", z1DialectSwitchesToTheTextChannelAfterTheHandshake),
-    ("z1 dialect falls back to the supplement pair for the text handshake", z1DialectFallsBackToTheSupplementPairForTheTextHandshake),
+    ("z1 dialect unlocks before the text handshake and never reads text on the vendor pair", z1DialectUnlocksBeforeTheTextHandshakeAndNeverReadsTextOnTheVendorPair),
 ]
 
 func usage() -> Never {

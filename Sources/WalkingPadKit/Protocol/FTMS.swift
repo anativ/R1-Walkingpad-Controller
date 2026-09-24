@@ -22,8 +22,10 @@ public enum FTMS {
     public static let featureUUID16: UInt16 = 0x2ACC
     /// Notify: training status (flags byte, status byte).
     public static let trainingStatusUUID16: UInt16 = 0x2AD3
-    /// Device Information service and its software-revision string.
+    /// Device Information service, its firmware- and software-revision strings. The Z1F's
+    /// `V0.0.6` is the software revision; its firmware reads like `J41_V301.08.14`.
     public static let deviceInformationServiceUUID16: UInt16 = 0x180A
+    public static let firmwareRevisionUUID16: UInt16 = 0x2A26
     public static let softwareRevisionUUID16: UInt16 = 0x2A28
 
     /// Standard FTMS training-status codes, for the log.
@@ -41,91 +43,139 @@ public enum FTMS {
 
     // MARK: KingSmith supplement service (KS-HD-* belts)
 
-    /// The vendor channel beside FTMS on the Z1 generation (KS-HD-* belts).
+    /// The vendor channel beside FTMS on the Z1 generation (KS-HD-* belts), and the gate in front
+    /// of it.
     ///
-    /// Frames to the belt are `[type, sub-command, payload length, payload…, checksum]` with the
-    /// checksum the low byte of the sum of everything before it. The belt answers on the notify
-    /// characteristic with ASCII-tagged frames: `WLR` (status report, 26 bytes), `WLV` (ack),
-    /// `WLU` (init / version), `WLQ` (query). Layout from kkz6/WalkingPadSDK, tested on a KS-HD-Z1D.
+    /// Until this channel is unlocked, the pad acknowledges every write but ignores the FTMS
+    /// Control Point and sends no notification on any characteristic. The unlock token comes from
+    /// the belt's Bluetooth name; the pad answers `71 80`, and from then on FTMS behaves by the
+    /// book. Verified on a `KS-HD-Z1D`, firmware V0.0.6, by slandau3/z1-walkingpad-mcp
+    /// (`docs/protocol.md`) and by the duttke.de Web Bluetooth controller.
     ///
-    /// Wake alone was not enough on firmware V0.0.6. The Swift SDK that drives a `KS-HD-Z1D`
-    /// first identifies the model (`71 00 …Z1D`) and syncs a timestamp (`71 01 …`) before it
-    /// queries, and it writes this channel without a GATT response. We do the same, then wake.
+    /// Frames in both directions are `[cmd0, cmd1, length, data…, checksum]`, where the checksum
+    /// is the low byte of the sum of every byte before it. Writes go to `…0D00` as Write
+    /// Commands, at least `minWriteSpacing` apart; replies arrive on `…0B00`.
     public enum Supplement {
         public static let serviceUUID = "24E2521C-F63B-48ED-85BE-C5330A00FDF7"
         public static let notifyUUID = "24E2521C-F63B-48ED-85BE-C5330B00FDF7"
         public static let writeUUID = "24E2521C-F63B-48ED-85BE-C5330D00FDF7"
 
-        public static func frame(_ type: UInt8, _ sub: UInt8, _ payload: [UInt8] = []) -> [UInt8] {
-            var bytes: [UInt8] = [type, sub, UInt8(payload.count)] + payload
+        /// The pad drops vendor writes that arrive closer together than this.
+        public static let minWriteSpacing: TimeInterval = 0.4
+        /// A frame starting with this byte puts the pad's chip into firmware-update mode. The app
+        /// never builds one; `isSafeToSend` exists so that stays checkable.
+        public static let otaCommand: UInt8 = 0xE8
+
+        public static func frame(_ cmd0: UInt8, _ cmd1: UInt8, _ data: [UInt8] = []) -> [UInt8] {
+            var bytes: [UInt8] = [cmd0, cmd1, UInt8(data.count)] + data
             bytes.append(UInt8(bytes.reduce(0) { $0 + Int($1) } & 0xFF))
             return bytes
         }
 
-        /// Model identifier: `71 00 05 64 91 5A 31 44 …`. Payload is two opaque bytes plus ASCII
-        /// `Z1D` — the BLE name of the belt under test.
-        public static let initDeviceBytes: [UInt8] = frame(0x71, 0x00, [0x64, 0x91, 0x5A, 0x31, 0x44])
-        /// Trailing four bytes of the timestamp frame, as the Swift SDK sends them.
-        public static let initTimestampTrailer: [UInt8] = [0x32, 0xF6, 0x59, 0x00]
-        /// Timestamp sync: `71 01 08` + little-endian unix time + trailer + checksum.
-        public static func initTimestampBytes(now: Date = Date()) -> [UInt8] {
-            let ts = UInt32(now.timeIntervalSince1970)
-            let tsBytes: [UInt8] = [
-                UInt8(ts & 0xFF),
-                UInt8((ts >> 8) & 0xFF),
-                UInt8((ts >> 16) & 0xFF),
-                UInt8((ts >> 24) & 0xFF),
-            ]
-            return frame(0x71, 0x01, tsBytes + initTimestampTrailer)
+        public static func isSafeToSend(_ bytes: [UInt8]) -> Bool {
+            bytes.first != otaCommand
         }
-        /// Wake the belt from standby: `72 01 03 0A 00 00 80`.
-        public static let wakeBytes: [UInt8] = frame(0x72, 0x01, [0x0A, 0x00, 0x00])
-        /// Put the belt into standby: `72 01 03 0A 40 00 C0`. Not sent by this app; documented so
-        /// nobody mistakes it for the wake frame — one byte apart.
-        public static let sleepBytes: [UInt8] = frame(0x72, 0x01, [0x0A, 0x40, 0x00])
-        /// Ask for a status report (`WLR` reply): `72 00 00 72`.
-        public static let queryStatusBytes: [UInt8] = frame(0x72, 0x00)
-        /// Ask for the configuration: `75 00 00 75`.
-        public static let queryConfigBytes: [UInt8] = frame(0x75, 0x00)
 
-        /// A `WLR` status report as the rest of the app understands it. Distance on the wire is
-        /// metres; `PadStatus` stores 10 m units.
-        public static func parseStatus(_ bytes: [UInt8], now: Date) -> PadStatus? {
-            guard bytes.count >= 12, bytes[0] == 0x57, bytes[1] == 0x4C, bytes[2] == 0x52 else { return nil }
-            let speedRaw = bytes[5]
-            let metres = Int(bytes[9]) | (Int(bytes[10]) << 8) | (Int(bytes[11]) << 16)
-            return PadStatus(
-                beltState: bytes[3] == 0 ? .stopped : .running,
-                speedRaw: speedRaw,
-                modeRaw: PadMode.manual.rawValue,
-                elapsed: Int(bytes[7]) | (Int(bytes[8]) << 8),
-                distanceRaw: metres / 10,
-                steps: 0,
-                appSpeedRaw: UInt8(min(255, Int(speedRaw) * 3)),
-                controllerButton: 0,
-                raw: bytes,
-                receivedAt: now
-            )
+        /// A reply frame, checksum verified.
+        public struct Frame: Equatable, Sendable {
+            public let cmd0: UInt8
+            public let cmd1: UInt8
+            public let data: [UInt8]
+
+            public init?(bytes: [UInt8]) {
+                guard bytes.count >= 4 else { return nil }
+                let length = Int(bytes[2])
+                guard bytes.count >= 3 + length + 1 else { return nil }
+                let sum = bytes[0..<(3 + length)].reduce(0) { $0 + Int($1) } & 0xFF
+                guard sum == Int(bytes[3 + length]) else { return nil }
+                cmd0 = bytes[0]
+                cmd1 = bytes[1]
+                data = Array(bytes[3..<(3 + length)])
+            }
+
+            public var isUnlockAccepted: Bool { cmd0 == 0x71 && cmd1 == 0x80 }
+        }
+
+        /// The unlock: `71 00 05 01 <T> <checksum>`, where `T` is the last four bytes of the
+        /// belt's name read as a little-endian `UInt32`, plus one. `KS-HD-Z1D` gives
+        /// `71 00 05 01 2E 5A 31 44 74`. Nil for a name too short to derive a token from.
+        ///
+        /// The `01` is a nonce the pad adds to the token. An earlier build sent the variant with
+        /// nonce `64` that kkz6/WalkingPadSDK hard-codes (`71 00 05 64 91 5A 31 44`) — the same
+        /// frame frozen to one name, never confirmed on this firmware.
+        public static func unlockBytes(name: String) -> [UInt8]? {
+            let tail = Array(name.utf8.suffix(4))
+            guard tail.count == 4 else { return nil }
+            let token = (UInt32(tail[0]) | UInt32(tail[1]) << 8 | UInt32(tail[2]) << 16 | UInt32(tail[3]) << 24) &+ 1
+            return frame(0x71, 0x00, [0x01] + littleEndian32(token))
+        }
+
+        /// Session info, sent once unlocked: `71 01 08 <unix time LE32> <user id LE32 = 0>`.
+        /// The pad answers `71 81` with protocol version, model and capability bits.
+        public static func sysInfoBytes(now: Date = Date()) -> [UInt8] {
+            frame(0x71, 0x01, littleEndian32(UInt32(now.timeIntervalSince1970)) + littleEndian32(0))
+        }
+
+        /// Read every property: `72 00 01 00 73`. The pad answers `72 80`.
+        public static let readAllPropertiesBytes: [UInt8] = frame(0x72, 0x00, [0x00])
+
+        /// Properties the Z1 reports, by id.
+        public static func propertyLabel(_ id: UInt8) -> String {
+            switch id {
+            case 1: return "units"
+            case 2: return "auto-stop"
+            case 4: return "motor version"
+            case 5: return "last error"
+            case 6: return "child lock"
+            case 8: return "switches"
+            case 10: return "mode"
+            default: return "property \(id)"
+            }
+        }
+
+        /// A `72 80` reply: four-byte records `[id, error, value lo, value hi]`. Records with an
+        /// error are left out.
+        public static func parseProperties(_ data: [UInt8]) -> [(id: UInt8, value: UInt16)] {
+            stride(from: 0, to: data.count - data.count % 4, by: 4).compactMap { i in
+                data[i + 1] == 0 ? (data[i], UInt16(data[i + 2]) | UInt16(data[i + 3]) << 8) : nil
+            }
         }
 
         /// A one-line reading of a reply frame, for the log.
         public static func describe(_ bytes: [UInt8]) -> String {
             let hex = bytes.map { String(format: "%02x", $0) }.joined(separator: " ")
-            guard bytes.count >= 3, bytes[0] == 0x57, bytes[1] == 0x4C else { return "Supplement reply: \(hex)" }
-            switch bytes[2] {
-            case 0x52 where bytes.count >= 12:
-                let belt = bytes[3]
-                let speed = bytes[5]
-                let time = Int(bytes[7]) | (Int(bytes[8]) << 8)
-                let distance = Int(bytes[9]) | (Int(bytes[10]) << 8) | (Int(bytes[11]) << 16)
-                return String(format: "Belt status (WLR): belt byte %d (%@), speed %.1f km/h, %ds, %dm — %@",
-                              belt, belt == 0 ? "idle" : "running", Double(speed) / 10, time, distance, hex)
-            case 0x52: return "Belt status (WLR, short): \(hex)"
-            case 0x56: return "Belt ack (WLV): \(hex)"
-            case 0x55: return "Belt init/version (WLU): \(hex)"
-            case 0x51: return "Belt query (WLQ): \(hex)"
-            default: return "Belt frame WL\(String(UnicodeScalar(bytes[2]))): \(hex)"
+            guard let f = Frame(bytes: bytes) else { return "Vendor reply (unframed): \(hex)" }
+            func props(_ records: [(id: UInt8, value: UInt16)]) -> String {
+                records.map { "\(propertyLabel($0.id)) 0x\(String(format: "%04x", $0.value))" }.joined(separator: ", ")
             }
+            switch (f.cmd0, f.cmd1) {
+            case (0x71, 0x80):
+                return "Belt unlocked (71 80)"
+            case (0x71, 0x81) where f.data.count >= 8:
+                let proto = Int(f.data[0]) | Int(f.data[1]) << 8
+                let model = Int(f.data[2]) | Int(f.data[3]) << 8
+                let caps = f.data[4..<8].reversed().map { String(format: "%02x", $0) }.joined()
+                return "Belt session info: protocol \(proto), model \(model), capabilities 0x\(caps)"
+            case (0x72, 0x80):
+                return "Belt properties: \(props(parseProperties(f.data)))"
+            case (0x72, 0x81):
+                return "Belt property write answered: \(hex)"
+            case (0x72, 0x50):
+                let pushed = stride(from: 0, to: f.data.count - f.data.count % 3, by: 3).map {
+                    (id: f.data[$0], value: UInt16(f.data[$0 + 1]) | UInt16(f.data[$0 + 2]) << 8)
+                }
+                return "Belt property changed: \(props(pushed))"
+            case (0x73, 0x50):
+                return "Belt exercise record: \(hex)"
+            case (0x73, 0x51):
+                return "Belt fault record: \(hex)"
+            default:
+                return "Vendor reply: \(hex)"
+            }
+        }
+
+        private static func littleEndian32(_ value: UInt32) -> [UInt8] {
+            [UInt8(value & 0xFF), UInt8((value >> 8) & 0xFF), UInt8((value >> 16) & 0xFF), UInt8(value >> 24)]
         }
     }
 

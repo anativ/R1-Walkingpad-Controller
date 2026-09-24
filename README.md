@@ -450,16 +450,16 @@ all handled:
   the speed is held until the belt reports movement, then for two more seconds, then sent.
 - **Request control is often refused** with "operation failed", yet the commands that follow
   are honoured. The refusal is logged and ignored.
-- **Some firmware does not answer on FTMS at all.** A Z1F on firmware V0.0.6 accepts every
-  read and every write, confirms every subscription, and then never sends a byte — no
-  Treadmill Data, no result codes, no events. The KS Fit app drives such belts over a second
-  channel on the vendor service (`24e2521c-…`, characteristics `…0e00` / `…0f00`): an
-  obfuscated text protocol. Commands are ASCII (`props runState 1`, `props CurrentSpeed 3.5`,
-  `servers getProp …`), base64-encoded, run through one of seven substitution tables, and sent
-  in 16-byte pieces; the belt's table is learned from its replies during an eight-step
-  greeting. When the belt has that pair, this app completes the greeting after connecting and
-  then polls status and sends every command over it. Without the pair it stays on FTMS, after
-  sending the vendor wake frame.
+- **Everything is gated behind a vendor unlock.** Until it is unlocked, a Z1 accepts every
+  write and confirms every subscription but ignores the Control Point and sends no
+  notification at all. The unlock goes to KingSmith's supplement service (`24e2521c-…`,
+  write `…0d00`, notify `…0b00`) as a Write Command: `71 00 05 01 <T> <checksum>`, where `T`
+  is the last four bytes of the belt's Bluetooth name read as a little-endian number, plus one
+  (`KS-HD-Z1D` gives `71 00 05 01 2e 5a 31 44 74`). The belt answers `71 80`, usually within
+  100 ms; the app allows 10 s and sends the unlock once more at 5 s. Only then does it send
+  session info (`71 01 …`), read the belt's properties (`72 00 01 00 73`) and request
+  control. Vendor writes are at least 400 ms apart. A command refused with "control not
+  permitted" gets control re-requested and is retried once.
 
 The belt also reports its supported speed range (`2AD4`), which the app treats as a hard limit
 on top of its own ceiling.
@@ -492,7 +492,9 @@ The classic protocol was reverse engineered by
 [ph4r05/ph4-walkingpad](https://github.com/ph4r05/ph4-walkingpad). The Z1 generation's FTMS
 details — the step-count extension, the subscription stagger, the spin-up hazard — come from
 [mcdax/walkingpad-controller](https://github.com/mcdax/walkingpad-controller)'s analysis of the
-KS Fit app. This app is an independent native Swift implementation of both. Not affiliated with
+KS Fit app; the vendor unlock from [duttke.de](https://www.duttke.de/en/walkingpad/) and
+[slandau3/z1-walkingpad-mcp](https://github.com/slandau3/z1-walkingpad-mcp), which verified it
+on a Z1. This app is an independent native Swift implementation of both. Not affiliated with
 KingSmith.
 
 ## License

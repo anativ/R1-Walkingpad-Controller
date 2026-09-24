@@ -85,6 +85,11 @@ cannot see the app. Verify through unified logging instead:
    the firmware drops the link. The controller holds the speed until the belt reports movement,
    waits `startSettleDelay`, then sends it; a stop or a newer speed cancels the hold, and the
    hold itself has a deadline (invariant 1).
+9. **A Z1 is silent until it is unlocked.** It ignores the Control Point and sends no
+   notification until the supplement channel answers `71 80` to the name-derived unlock
+   (`FTMS.Supplement.unlockBytes`). Nothing but the unlock may reach the vendor channel before
+   that; vendor writes are Write Commands at least 400 ms apart, and never a frame starting
+   `0xE8` (OTA). See [ADR 0005](docs/adr/0005-z1-vendor-unlock.md).
 
 ## Layout
 
@@ -107,3 +112,6 @@ The classic protocol was reverse engineered by
 independent native Swift implementation. Not affiliated with KingSmith. The FTMS path was built
 from those references and the spec, without a Z1F in hand — the first thing to do with real
 hardware is `./dist/padctl --z1 watch` and compare the log against `docs/adr/0004-belt-dialects.md`.
+The Z1 unlock comes from [slandau3/z1-walkingpad-mcp](https://github.com/slandau3/z1-walkingpad-mcp)
+(`docs/protocol.md`), verified on a `KS-HD-Z1D` — the best reference for anything else on that
+vendor channel.

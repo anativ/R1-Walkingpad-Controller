@@ -78,8 +78,13 @@ public final class PadController: NSObject, ObservableObject {
     private static let broadScanFallbackDelay: TimeInterval = 6.0
     /// Total time to look for a belt before reporting that none was found.
     private static let scanBudget: TimeInterval = 15.0
-    /// Time allowed to go from "belt discovered" to "ready to accept commands".
-    private static let connectBudget: TimeInterval = 12.0
+    /// Time allowed to go from "belt discovered" to "ready to accept commands". Covers discovery,
+    /// the staggered subscriptions and a dialect handshake that may take its full budget (the
+    /// Z1's unlock: 10 s, 20 s with a text handshake after it).
+    private static let connectBudget: TimeInterval = 30.0
+    /// A Write Command gets no callback, so bring-up waits this long after one instead. The Z1's
+    /// vendor channel drops writes that arrive closer together than 400 ms.
+    private static let writeCommandSettle: TimeInterval = 0.4
     /// How long to wait for the belt to echo back a speed we asked for.
     private static let speedConfirmBudget: TimeInterval = 4.0
     /// How long a held speed waits for the belt to start moving (FTMS cold start).
@@ -177,6 +182,9 @@ public final class PadController: NSObject, ObservableObject {
     private var setupAwaiting: CBUUID?
     private var setupPauseAfter: TimeInterval = 0
     private var setupStepTimer: Timer?
+    private var handshakeRetryTimer: Timer?
+    /// The belt's Bluetooth name as found in the scan; the Z1 derives its unlock token from it.
+    private var peripheralName: String?
     private var setupWorkItem: DispatchWorkItem?
     /// Longest wait for macOS to confirm one bring-up step (a notification enable, a read, a
     /// write). Missing confirmations are logged and skipped; the connect budget still caps the whole.
@@ -349,6 +357,9 @@ public final class PadController: NSObject, ObservableObject {
         setupAwaiting = nil
         setupStepTimer?.invalidate()
         setupStepTimer = nil
+        handshakeRetryTimer?.invalidate()
+        handshakeRetryTimer = nil
+        peripheralName = nil
         writeBacklog.removeAll()
         writeChainActive = false
         firstStatusTimer?.invalidate()
@@ -480,12 +491,8 @@ public final class PadController: NSObject, ObservableObject {
         }
 
         guard let write = dialect.encode(outgoing), characteristics[write.characteristic] != nil else { return }
-        var writes: [BeltWrite] = []
-        if let preamble = dialect.preamble(for: outgoing), characteristics[preamble.characteristic] != nil {
-            writes.append(preamble)
-        }
-        writes.append(write)
-        scheduleWrites(writes, spacing: KSText.chunkSpacing)
+        scheduleWrites([write], spacing: KSText.chunkSpacing)
+        dialect.didSend(write)
         lastSendAt = Date()
         if case .setSpeed = outgoing { armSpeedConfirmDeadline() }
         if !outgoing.isStatusPoll {
@@ -742,6 +749,7 @@ extension PadController: CBCentralManagerDelegate {
         stopScan()
         self.rssi = RSSI.intValue
         self.peripheral = peripheral
+        peripheralName = name
         peripheral.delegate = self
         state = .connecting(name ?? "WalkingPad")
         armConnectDeadline()
@@ -879,17 +887,30 @@ extension PadController: CBPeripheralDelegate {
             if PadController.writeType(write, on: characteristic) == .withResponse {
                 setupAwaiting = write.characteristic
             } else {
-                setupPauseAfter = 0.3
+                setupPauseAfter = PadController.writeCommandSettle
             }
             scheduleWrites([write], spacing: KSText.chunkSpacing)
-        case .handshake(let budget):
+        case .handshake(let budget, let retryAfter):
             setupAwaiting = PadController.handshakeMarker
+            // Whatever the handshake last wrote may have been a Write Command; the step after it
+            // must not crowd it.
+            setupPauseAfter = PadController.writeCommandSettle
             setupStepTimer = Timer.scheduledTimer(withTimeInterval: budget, repeats: false) { [weak self] _ in
                 guard let self, self.setupAwaiting == PadController.handshakeMarker else { return }
-                self.appendLog("Handshake not completed within \(Int(budget))s — continuing with FTMS only", .warning)
+                self.handshakeRetryTimer?.invalidate()
+                self.handshakeRetryTimer = nil
+                self.appendLog("Handshake not completed within \(Int(budget))s — continuing without it", .warning)
                 self.completeSetupStep(for: PadController.handshakeMarker)
             }
-            for event in dialect.beginHandshake(now: Date()) { handle(event) }
+            if let retryAfter {
+                handshakeRetryTimer = Timer.scheduledTimer(withTimeInterval: retryAfter, repeats: false) { [weak self] _ in
+                    guard let self else { return }
+                    self.handshakeRetryTimer = nil
+                    guard self.setupAwaiting == PadController.handshakeMarker else { return }
+                    for event in self.dialect.retryHandshake(now: Date()) { self.handle(event) }
+                }
+            }
+            for event in dialect.beginHandshake(peripheralName: peripheralName, now: Date()) { handle(event) }
             return
         }
         if setupAwaiting != nil {
@@ -1017,6 +1038,8 @@ extension PadController: CBPeripheralDelegate {
             }
             scheduleWrites(writes, spacing: spacing)
         case .handshakeComplete:
+            handshakeRetryTimer?.invalidate()
+            handshakeRetryTimer = nil
             if setupAwaiting == PadController.handshakeMarker {
                 completeSetupStep(for: PadController.handshakeMarker)
             }

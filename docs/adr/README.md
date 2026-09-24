@@ -6,3 +6,4 @@
 | [0002](0002-research-backed-pace-algorithms.md) | Research-backed pace algorithms, as a cycle of timed blocks | Accepted |
 | [0003](0003-ci-adhoc-release.md) | CI publishes an ad-hoc-signed downloadable app | Accepted |
 | [0004](0004-belt-dialects.md) | Two belt families (classic and Z1 FTMS) behind a dialect interface, chosen by the user | Accepted |
+| [0005](0005-z1-vendor-unlock.md) | Unlock the Z1 on the vendor channel before any FTMS | Accepted |

@@ -1,9 +1,36 @@
 # WalkingPad Z1F — investigation report
 
-Status as of 4 September 2026, app v1.8. The belt under test is on another Mac; every fact
+Status as of 24 September 2026, app v1.9. The belt under test is on another Mac. Every fact
 below comes from its diagnostics logs, from public reverse-engineering work, or from the code.
-The five logs received so far are in the appendix, verbatim. No log from v1.6, v1.7 or v1.8
-has arrived yet.
+The five logs received so far are in the appendix, verbatim. No log from v1.6 or later has
+arrived yet.
+
+## Resolution (v1.9) — the belt was never unlocked
+
+slandau3/z1-walkingpad-mcp documents the missing step, verified on hardware on the same pad
+and software (`KS-HD-Z1D`, V0.0.6). The duttke.de Web Bluetooth controller does the same
+thing. The pad gates everything behind an unlock on the supplement service. Until it answers
+`71 80`, it acknowledges every write, ignores the Control Point and sends **no notification on
+any characteristic**. That is exactly what all five logs show.
+
+- **Unlock:** `71 00 05 01 <T> <checksum>` to `…0D00`, as a Write Command. `T` is the last
+  four bytes of the Bluetooth name, read as a little-endian `UInt32`, plus one. For
+  `KS-HD-Z1D` the frame is `71 00 05 01 2e 5a 31 44 74`.
+- **v1.8's `71 00 05 64 91 5a 31 44` is the same frame with nonce `0x64`**
+  (`0x91 = 0x2D + 0x64`), taken from kkz6/WalkingPadSDK. It was sent alongside a wrong
+  timestamp frame and a "wake" frame, and has never been confirmed on this firmware.
+- **v1.8 could not have logged the ack anyway.** Without a `…0E00/0F00` pair, the text
+  fallback routed every supplement reply into a buffer that waits for `0x0D`, and
+  `71 80 00 f1` never ends in `0x0D`.
+- **The "wake" frame `72 01 03 0a 00 00` is a property write** (id 10, device mode) that set
+  the whole mode word to zero. `72 00 00 72` is not a status query. The pad never sends `WLR`
+  replies.
+- **`V0.0.6` is the software revision (`2A28`).** The firmware revision is on `2A26`.
+
+v1.9 subscribes `…0B00`, sends the unlock (again at 5 s, giving up at 10 s), waits for
+`71 80`, then sends session info, reads the properties and requests control. See
+[ADR 0005](adr/0005-z1-vendor-unlock.md). Everything below is the investigation as it stood
+before this, kept as the record.
 
 ## Summary
 
@@ -68,6 +95,7 @@ connected, reads fine, every Control Point command timed out, belt never started
 | v1.6 | V0.0.6 does not talk FTMS at all; KS Fit uses the obfuscated **text protocol** on the vendor service's second pair (`…0E00` / `…0F00`) | Discover every vendor characteristic; eight-step handshake; `props` commands; polled status | **Not yet tested on the belt** |
 | v1.7 | — | One-click diagnostics report to the Desktop | — |
 | v1.8 | Wake-only was the wrong vendor greeting; the text protocol may live on the pair we already have | Model+timestamp init frames before wake; Write Command on the vendor channel; text handshake falls back to `…0B00`/`…0D00`; `WLR` becomes a `PadStatus` | **Not yet tested on the belt** |
+| v1.9 | The pad is locked until a name-derived unlock (verified on hardware by slandau3 and duttke.de) | Unlock `71 00 05 01 <T>`, wait for `71 80`, then session info, property read, request control; wake, WLR and text-on-supplement removed | **Not yet tested on the belt** |
 
 Two things were fixed along the way that were real but not the cause: the timer-based
 bring-up (v1.2) and the strict "More Data" handling (v1.3). A code review also closed two
@@ -154,26 +182,24 @@ log is a v1.7/v1.8 Desktop report, not another `log show`.
 
 ## Next steps, in order
 
-1. **Run v1.8 on the belt and send the report.** Belt awake, display on, KS Fit fully
-   closed on the phone (better: phone Bluetooth off). Connect, press Start, press
-   *Save diagnostics…*, send the Desktop file. The lines that decide the next move:
-   - `Service 24E2521C-…: …` — does it list `…0E00` and `…0F00`?
-   - `TX 71 00 05 64 91 5a 31 44 …` then `TX 71 01 08 …` — init frames went out.
-   - `KingSmith text channel present` / `No v6 text pair — trying the handshake on the supplement channel` followed by `KS: …` replies.
-   - `Belt status (WLR): …` — the binary vendor channel answered; the UI should show speed.
-   - `Handshake not completed within …s` — pair present, belt not answering.
-2. **If the pair is missing:** turn Bluetooth off and on (clears the GATT cache), retry once.
-   v1.8 already tries the handshake on `…0B00`/`…0D00` in that case.
-3. **If the pair answers but stops mid-greeting:** the reply text shows which step; compare
-   against c3p0's expected tokens; the table list may need a new entry.
-4. **If nothing answers on any channel:** capture what KS Fit sends. On Android: Developer
-   options → *Enable Bluetooth HCI snoop log*, run KS Fit, start and stop the belt once, pull
-   the log with `adb bugreport`. On iPhone: Apple's Bluetooth logging profile and
-   PacketLogger. One capture ends the guessing.
-5. **Consider a firmware update through KS Fit** and re-read `2A28`. If the belt moves off
-   V0.0.6, the plain FTMS path may simply start working, as it does for other owners.
+1. **Run v1.9 on the belt and send the report.** Close KS Fit fully on the phone (or better,
+   turn off the phone's Bluetooth). Connect, press Start, press *Save diagnostics…*, and send
+   the Desktop file. The lines that decide the next move:
+   - `Unlocking KS-HD-Z1D on the vendor channel`, then `TX 71 00 05 01 2e 5a 31 44 74`.
+   - `Belt unlocked (71 80)`. This is the line that matters.
+   - `Belt session info: …` and `Belt properties: …`. The vendor channel is talking.
+   - A `First status frame`, and the belt moving on Start.
+   - `No unlock reply yet`, then `Handshake not completed within 10s`. The pad refused the
+     unlock: compare the name in `Found …` against the TX token.
+2. **If the unlock is answered but the belt ignores Start:** look for `rejected … control not
+   permitted` and whether the retry line follows.
+3. **If nothing answers:** capture what KS Fit sends (Android HCI snoop log, or PacketLogger
+   on iPhone). The KS Fit app unlocks with an `E2 00 0A …` form of the same handshake.
 
 ## References
+
+- slandau3/z1-walkingpad-mcp `docs/protocol.md` — the unlock and the vendor RPC, verified on a `KS-HD-Z1D`, V0.0.6
+- duttke.de/en/walkingpad — Web Bluetooth controller the `71` unlock comes from
 
 - mcdax/walkingpad-controller — FTMS reference and issue 3 (the other Z1F, same firmware)
 - mcdax/walkingpad-controller `docs/ftms-protocol-reference.md` and

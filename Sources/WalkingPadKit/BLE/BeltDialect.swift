@@ -51,7 +51,8 @@ public enum BeltSetupStep: Equatable {
     case read(CBUUID)
     case write(BeltWrite)
     /// Hand over to the dialect's reply-driven bring-up (`beginHandshake`), for at most `budget`.
-    case handshake(budget: TimeInterval)
+    /// When `retryAfter` is set and the belt has not answered by then, `retryHandshake` runs once.
+    case handshake(budget: TimeInterval, retryAfter: TimeInterval? = nil)
 }
 
 /// Everything protocol-specific the controller needs, so `PadController` itself only knows about
@@ -70,8 +71,11 @@ public protocol BeltDialect: AnyObject {
     /// Told what the belt actually exposes, before bring-up starts.
     func didDiscover(characteristics: Set<CBUUID>)
     /// Start the reply-driven part of bring-up. Returns what to do first — writes to make, or
-    /// `.handshakeComplete` straight away when this belt needs none.
-    func beginHandshake(now: Date) -> [BeltEvent]
+    /// `.handshakeComplete` straight away when this belt needs none. `peripheralName` is the
+    /// belt's Bluetooth name, which some firmware derives its unlock token from.
+    func beginHandshake(peripheralName: String?, now: Date) -> [BeltEvent]
+    /// The belt has not answered the handshake within `retryAfter`: what to send again, if anything.
+    func retryHandshake(now: Date) -> [BeltEvent]
     /// Characteristics without which the belt cannot be driven.
     var requiredCharacteristicUUIDs: [CBUUID] { get }
     /// Lower-cased fragments a belt's advertised name may contain (the name-matching fallback scan).
@@ -85,8 +89,8 @@ public protocol BeltDialect: AnyObject {
 
     /// The write that realises a command, or nil when this belt has no such command.
     func encode(_ command: PadCommand) -> BeltWrite?
-    /// A vendor frame to write immediately before a command, where the firmware wants one.
-    func preamble(for command: PadCommand) -> BeltWrite?
+    /// Told each command write as it goes out, so a refusal can be retried with the same bytes.
+    func didSend(_ write: BeltWrite)
     /// Translate a notification or read result.
     func decode(characteristic: CBUUID, bytes: [UInt8], now: Date) -> [BeltEvent]
     /// Forget per-connection decoder state.
@@ -94,10 +98,11 @@ public protocol BeltDialect: AnyObject {
 }
 
 public extension BeltDialect {
-    func preamble(for command: PadCommand) -> BeltWrite? { nil }
     func characteristicUUIDs(for service: CBUUID) -> [CBUUID]? { characteristicUUIDs }
     func didDiscover(characteristics: Set<CBUUID>) {}
-    func beginHandshake(now: Date) -> [BeltEvent] { [.handshakeComplete] }
+    func beginHandshake(peripheralName: String?, now: Date) -> [BeltEvent] { [.handshakeComplete] }
+    func retryHandshake(now: Date) -> [BeltEvent] { [] }
+    func didSend(_ write: BeltWrite) {}
 
     /// Whether a name seen during a broad scan is plausibly this family of belt.
     func looksLikeBelt(name: String?) -> Bool {
@@ -173,14 +178,26 @@ public final class FTMSDialect: BeltDialect {
     public static let featureUUID = CBUUID(string: String(format: "%04X", FTMS.featureUUID16))
     public static let trainingStatusUUID = CBUUID(string: String(format: "%04X", FTMS.trainingStatusUUID16))
     public static let deviceInformationServiceUUID = CBUUID(string: String(format: "%04X", FTMS.deviceInformationServiceUUID16))
+    public static let firmwareRevisionUUID = CBUUID(string: String(format: "%04X", FTMS.firmwareRevisionUUID16))
     public static let softwareRevisionUUID = CBUUID(string: String(format: "%04X", FTMS.softwareRevisionUUID16))
-    /// KingSmith's vendor "supplement" service on `KS-HD-*` belts (Z1, Z1F).
+    /// KingSmith's vendor "supplement" service on `KS-HD-*` belts (Z1, Z1F). It carries the
+    /// unlock that everything else on these belts waits for.
     public static let supplementServiceUUID = CBUUID(string: FTMS.Supplement.serviceUUID)
     public static let supplementNotifyUUID = CBUUID(string: FTMS.Supplement.notifyUUID)
     public static let supplementWriteUUID = CBUUID(string: FTMS.Supplement.writeUUID)
-    /// The second pair on the same service: KingSmith's obfuscated text protocol (see `KSText`).
+    /// The second pair on the same service, "v6 only" per the KS Fit decompilation: KingSmith's
+    /// obfuscated text protocol (see `KSText`). Never seen on a belt yet.
     public static let textNotifyUUID = CBUUID(string: KSText.notifyUUID)
     public static let textWriteUUID = CBUUID(string: KSText.writeUUID)
+
+    /// How long the pad gets to answer the unlock, and when it is sent once more. It usually
+    /// answers within 100 ms.
+    public static let unlockBudget: TimeInterval = 10
+    public static let unlockRetryAfter: TimeInterval = 5
+    /// Between the renewed "request control" and the retried command (invariant 3).
+    static let controlRetrySpacing: TimeInterval = 0.7
+    /// The text handshake's own allowance, on a belt that has the dedicated pair.
+    public static let textHandshakeBudget: TimeInterval = 10
 
     private var assembler = FTMS.StatusAssembler()
     /// The firmware replays its last event the moment notifications are enabled — usually a
@@ -190,19 +207,23 @@ public final class FTMSDialect: BeltDialect {
     /// belt speaking an unexpected layout shows up in the log instead of as silence.
     private var unparsedFramesLogged = 0
 
-    /// The text protocol, when the belt has a notify/write pair for it. Dedicated `…0E00`/`…0F00`
-    /// is preferred; firmware that never grew that pair is driven on the supplement `…0B00`/`…0D00`.
-    private var hasTextChannel = false
+    /// The belt has the supplement notify/write pair, so it must be unlocked before FTMS works.
+    private var hasSupplementPair = false
+    private var unlockFrame: [UInt8]?
+    public private(set) var isUnlocked = false
+    /// The dedicated `…0E00`/`…0F00` pair, when the belt has one. Its text handshake runs after
+    /// the unlock; the supplement pair itself is a binary channel and never carries text.
     private var hasDedicatedTextPair = false
-    private var textNotify = FTMSDialect.textNotifyUUID
-    private var textWrite = FTMSDialect.textWriteUUID
     private var handshake = KSText.Handshake()
-    /// Whether commands and status go over the text channel. Set once the handshake completes.
+    private var textHandshakeRunning = false
+    /// Whether commands and status go over the text channel. Set once the text handshake completes.
     public private(set) var usesTextProtocol = false
-    /// A `WLR` report arrived on the vendor notify characteristic. Status is then polled there.
-    public private(set) var usesVendorStatus = false
     private var textBuffer: [UInt8] = []
     private var textAssembler = KSText.StatusAssembler()
+    /// The last Control Point command sent, and whether a "control not permitted" refusal of it
+    /// has already been retried.
+    private var lastControlWrite: BeltWrite?
+    private var retriedLastControl = false
 
     public init() {}
 
@@ -215,7 +236,7 @@ public final class FTMSDialect: BeltDialect {
         [FTMSDialect.treadmillDataUUID, FTMSDialect.speedRangeUUID, FTMSDialect.featureUUID,
          FTMSDialect.controlPointUUID, FTMSDialect.machineStatusUUID, FTMSDialect.trainingStatusUUID,
          FTMSDialect.supplementNotifyUUID, FTMSDialect.supplementWriteUUID,
-         FTMSDialect.softwareRevisionUUID]
+         FTMSDialect.firmwareRevisionUUID, FTMSDialect.softwareRevisionUUID]
     }
     public var requiredCharacteristicUUIDs: [CBUUID] {
         [FTMSDialect.controlPointUUID, FTMSDialect.treadmillDataUUID]
@@ -223,46 +244,54 @@ public final class FTMSDialect: BeltDialect {
     public var nameFragments: [String] {
         ["ks-hd", "ks-mc21", "ks-smc21c", "zp-zealr1", "walkingpad", "kingsmith", "z1"]
     }
-    /// FTMS pushes status; the text protocol and the vendor `WLR` report have to be asked.
-    public var pollsForStatus: Bool { usesTextProtocol || usesVendorStatus }
+    /// FTMS pushes status; the text protocol has to be asked.
+    public var pollsForStatus: Bool { usesTextProtocol }
     public var holdsSpeedUntilBeltMoves: Bool { true }
 
-    /// Every characteristic of the vendor service is discovered, because which pairs it carries
-    /// is exactly what decides how this belt can be driven.
+    /// Every characteristic of the vendor service is discovered, so the log shows what this
+    /// firmware really carries.
     public func characteristicUUIDs(for service: CBUUID) -> [CBUUID]? {
         service == FTMSDialect.supplementServiceUUID ? nil : characteristicUUIDs
     }
 
     public func didDiscover(characteristics: Set<CBUUID>) {
+        hasSupplementPair = characteristics.contains(FTMSDialect.supplementNotifyUUID)
+            && characteristics.contains(FTMSDialect.supplementWriteUUID)
         hasDedicatedTextPair = characteristics.contains(FTMSDialect.textNotifyUUID)
             && characteristics.contains(FTMSDialect.textWriteUUID)
-        if hasDedicatedTextPair {
-            hasTextChannel = true
-            textNotify = FTMSDialect.textNotifyUUID
-            textWrite = FTMSDialect.textWriteUUID
-        } else if characteristics.contains(FTMSDialect.supplementNotifyUUID)
-                    && characteristics.contains(FTMSDialect.supplementWriteUUID) {
-            // V0.0.6 confirmed `…0B00`/`…0D00` and never listed the v6 pair. The text protocol
-            // may live on this pair; binary wake/query on it drew no reply.
-            hasTextChannel = true
-            textNotify = FTMSDialect.supplementNotifyUUID
-            textWrite = FTMSDialect.supplementWriteUUID
-        }
     }
 
-    public func beginHandshake(now: Date) -> [BeltEvent] {
-        guard hasTextChannel else { return [.handshakeComplete] }
+    public func beginHandshake(peripheralName: String?, now: Date) -> [BeltEvent] {
+        guard hasSupplementPair else { return startTextHandshake(now: now) }
+        guard let name = peripheralName, let frame = FTMS.Supplement.unlockBytes(name: name) else {
+            return [.note("Belt name \(peripheralName.map { "'\($0)'" } ?? "unknown") is too short to derive "
+                          + "the vendor unlock from — trying FTMS without it", isWarning: true)]
+                + startTextHandshake(now: now)
+        }
+        unlockFrame = frame
+        return [.note("Unlocking \(name) on the vendor channel", isWarning: false),
+                .send([FTMSDialect.supplementWrite(frame)], spacing: FTMS.Supplement.minWriteSpacing)]
+    }
+
+    public func retryHandshake(now: Date) -> [BeltEvent] {
+        guard let frame = unlockFrame, !isUnlocked else { return [] }
+        return [.note("No unlock reply yet — sending it once more", isWarning: true),
+                .send([FTMSDialect.supplementWrite(frame)], spacing: FTMS.Supplement.minWriteSpacing)]
+    }
+
+    /// The text handshake, where the belt has a pair for it; otherwise bring-up is done.
+    private func startTextHandshake(now: Date) -> [BeltEvent] {
+        guard hasDedicatedTextPair else { return [.handshakeComplete] }
         handshake = KSText.Handshake()
-        let note = hasDedicatedTextPair
-            ? "KingSmith text channel present — starting its handshake"
-            : "No v6 text pair — trying the handshake on the supplement channel"
-        return [.note(note, isWarning: false)] + handshakeWrites(now: now)
+        textHandshakeRunning = true
+        return [.note("KingSmith text channel present — starting its handshake", isWarning: false)]
+            + handshakeWrites(now: now)
     }
 
     /// The current handshake step, in every spelling still possible, as chunked writes.
     private func handshakeWrites(now: Date) -> [BeltEvent] {
         let writes = handshake.payloads(now: now).map {
-            BeltWrite(characteristic: textWrite, bytes: $0, chunkSize: KSText.chunkSize, withoutResponse: true)
+            BeltWrite(characteristic: FTMSDialect.textWriteUUID, bytes: $0, chunkSize: KSText.chunkSize, withoutResponse: true)
         }
         guard !writes.isEmpty else { return [] }
         return [.send(writes, spacing: KSText.handshakeSpacing)]
@@ -271,24 +300,23 @@ public final class FTMSDialect: BeltDialect {
     /// A text command, encoded with the belt's table (or the likeliest one), chunked.
     private func textCommand(_ command: String) -> BeltWrite {
         let table = handshake.table ?? handshake.candidates.first ?? KSText.tables[0]
-        return BeltWrite(characteristic: textWrite, bytes: KSText.encode(command, table: table),
+        return BeltWrite(characteristic: FTMSDialect.textWriteUUID, bytes: KSText.encode(command, table: table),
                          chunkSize: KSText.chunkSize, withoutResponse: true)
     }
 
-    /// A vendor-channel write. The Swift SDK uses Write Command on this characteristic.
-    private static func supplementWrite(_ bytes: [UInt8]) -> BeltWrite {
-        BeltWrite(characteristic: FTMSDialect.supplementWriteUUID, bytes: bytes, withoutResponse: true)
+    /// A vendor-channel write: a Write Command, as the pad requires. Never an OTA frame.
+    static func supplementWrite(_ bytes: [UInt8]) -> BeltWrite {
+        precondition(FTMS.Supplement.isSafeToSend(bytes), "refusing to build a firmware-update frame")
+        return BeltWrite(characteristic: FTMSDialect.supplementWriteUUID, bytes: bytes, withoutResponse: true)
     }
 
     /// The firmware silently drops notification enables that land within ~30 ms of each other,
     /// so the subscriptions are staggered the way the vendor app does it (100 / 200 / 300 ms).
-    /// Control is then requested once; some firmware rejects the request yet honours the
-    /// commands that follow, so the reply is logged but not acted on.
     ///
-    /// On `KS-HD-*` belts the Swift SDK identifies the model and syncs a timestamp on the
-    /// vendor channel before it queries, and writes that channel without a GATT response.
-    /// Wake-only was accepted by a V0.0.6 Z1F and changed nothing; the init frames are what
-    /// it never saw. Steps whose characteristic the belt lacks are skipped by the controller.
+    /// The supplement notify characteristic is subscribed before anything is written to the
+    /// vendor channel, then the handshake unlocks the pad. Only after that are the session-info
+    /// and property reads sent and control requested: a locked pad ignores all of it. Steps whose
+    /// characteristic the belt lacks are skipped by the controller.
     public var setupSteps: [BeltSetupStep] {
         [
             .read(FTMSDialect.featureUUID),
@@ -298,31 +326,15 @@ public final class FTMSDialect: BeltDialect {
             .subscribe(FTMSDialect.controlPointUUID, pauseAfter: 0.3),
             .subscribe(FTMSDialect.treadmillDataUUID, pauseAfter: 0.3),
             .subscribe(FTMSDialect.supplementNotifyUUID, pauseAfter: 0.3),
-            .read(FTMSDialect.softwareRevisionUUID),
-            .write(FTMSDialect.supplementWrite(FTMS.Supplement.initDeviceBytes)),
-            .write(FTMSDialect.supplementWrite(FTMS.Supplement.initTimestampBytes())),
-            .write(FTMSDialect.wake),
-            .write(FTMSDialect.supplementWrite(FTMS.Supplement.queryStatusBytes)),
             .subscribe(FTMSDialect.textNotifyUUID, pauseAfter: 0.3),
-            .handshake(budget: hasDedicatedTextPair ? 10 : 4),
+            .read(FTMSDialect.firmwareRevisionUUID),
+            .read(FTMSDialect.softwareRevisionUUID),
+            .handshake(budget: FTMSDialect.unlockBudget + (hasDedicatedTextPair ? FTMSDialect.textHandshakeBudget : 0),
+                       retryAfter: FTMSDialect.unlockRetryAfter),
+            .write(FTMSDialect.supplementWrite(FTMS.Supplement.sysInfoBytes())),
+            .write(FTMSDialect.supplementWrite(FTMS.Supplement.readAllPropertiesBytes)),
             .write(BeltWrite(characteristic: FTMSDialect.controlPointUUID, bytes: FTMS.requestControlBytes)),
         ]
-    }
-
-    /// The vendor wake frame. Harmless on a belt that is already awake.
-    public static let wake = BeltWrite(
-        characteristic: FTMSDialect.supplementWriteUUID, bytes: FTMS.Supplement.wakeBytes, withoutResponse: true
-    )
-
-    /// A start may come long after connecting, and the belt may have dozed off again in between,
-    /// so it is woken once more right before. Speed and stop are left alone: a belt that is
-    /// moving is awake by definition, and a stop must not be delayed by anything.
-    public func preamble(for command: PadCommand) -> BeltWrite? {
-        guard !usesTextProtocol else { return nil }
-        switch command {
-        case .start: return FTMSDialect.wake
-        default: return nil
-        }
     }
 
     public func encode(_ command: PadCommand) -> BeltWrite? {
@@ -335,9 +347,6 @@ public final class FTMSDialect: BeltDialect {
             case .setMode(let mode): return textCommand(KSText.setMode(mode))
             case .askHistory, .setPreference: return nil
             }
-        }
-        if usesVendorStatus, case .askStats = command {
-            return FTMSDialect.supplementWrite(FTMS.Supplement.queryStatusBytes)
         }
         let cp = FTMSDialect.controlPointUUID
         switch command {
@@ -352,6 +361,12 @@ public final class FTMSDialect: BeltDialect {
             // preference channel in the standard service.
             return nil
         }
+    }
+
+    public func didSend(_ write: BeltWrite) {
+        guard write.characteristic == FTMSDialect.controlPointUUID else { return }
+        lastControlWrite = write
+        retriedLastControl = false
     }
 
     public func decode(characteristic: CBUUID, bytes: [UInt8], now: Date) -> [BeltEvent] {
@@ -373,9 +388,10 @@ public final class FTMSDialect: BeltDialect {
             let target = bytes[4..<8].reversed().map { String(format: "%02x", $0) }.joined()
             return [.note("Machine features 0x\(machine), target features 0x\(target)", isWarning: false)]
 
-        case FTMSDialect.softwareRevisionUUID:
+        case FTMSDialect.firmwareRevisionUUID, FTMSDialect.softwareRevisionUUID:
             let text = String(decoding: bytes.filter { $0 != 0 }, as: UTF8.self)
-            return [.note("Belt firmware: \(text.isEmpty ? "unknown" : text)", isWarning: false)]
+            let what = characteristic == FTMSDialect.firmwareRevisionUUID ? "firmware" : "software"
+            return [.note("Belt \(what): \(text.isEmpty ? "unknown" : text)", isWarning: false)]
 
         case FTMSDialect.machineStatusUUID:
             guard let event = FTMS.MachineEvent(bytes: bytes) else { return [.unknown(bytes)] }
@@ -401,21 +417,19 @@ public final class FTMSDialect: BeltDialect {
             // A refused "request control" is routine on this firmware and the belt still obeys.
             let routine = response.opcode == .requestControl
             events.append(.note(response.description, isWarning: !response.isSuccess && !routine))
-            return events
+            return events + retryAfterControlRefusal(response)
 
         case FTMSDialect.speedRangeUUID:
             guard let range = FTMS.SpeedRange(bytes: bytes) else { return [.unknown(bytes)] }
             return [.speedRange(range), .note(range.description, isWarning: false)]
 
         case FTMSDialect.supplementNotifyUUID:
-            if let status = FTMS.Supplement.parseStatus(bytes, now: now) {
-                usesVendorStatus = true
-                return [.status(status), .note(FTMS.Supplement.describe(bytes), isWarning: false)]
+            var events: [BeltEvent] = [.note(FTMS.Supplement.describe(bytes), isWarning: false)]
+            if FTMS.Supplement.Frame(bytes: bytes)?.isUnlockAccepted == true, !isUnlocked {
+                isUnlocked = true
+                events += startTextHandshake(now: now)
             }
-            if textNotify == FTMSDialect.supplementNotifyUUID {
-                return decodeText(bytes, now: now)
-            }
-            return [.note(FTMS.Supplement.describe(bytes), isWarning: false)]
+            return events
 
         case FTMSDialect.textNotifyUUID:
             return decodeText(bytes, now: now)
@@ -423,6 +437,19 @@ public final class FTMSDialect: BeltDialect {
         default:
             return [.unknown(bytes)]
         }
+    }
+
+    /// "Control not permitted" means the pad forgot who is in charge: ask again, then repeat the
+    /// refused command — once, and only if nothing newer has gone out since. The bytes are the
+    /// ones already sent, so the speed in them was clamped before it first reached the wire.
+    private func retryAfterControlRefusal(_ response: FTMS.Response) -> [BeltEvent] {
+        guard response.result == .controlNotPermitted, response.opcode != .requestControl,
+              let last = lastControlWrite, last.bytes.first == response.opcodeRaw, !retriedLastControl
+        else { return [] }
+        retriedLastControl = true
+        let requestControl = BeltWrite(characteristic: FTMSDialect.controlPointUUID, bytes: FTMS.requestControlBytes)
+        return [.note("Requesting control again and retrying once", isWarning: true),
+                .send([requestControl, last], spacing: FTMSDialect.controlRetrySpacing)]
     }
 
     /// Replies arrive in pieces and end with a carriage return.
@@ -442,10 +469,11 @@ public final class FTMSDialect: BeltDialect {
         }
         if handshake.isComplete, !wasComplete {
             usesTextProtocol = true
+            textHandshakeRunning = false
             let table = handshake.table.map { "table \(KSText.tables.firstIndex(of: $0).map { $0 + 1 } ?? 0)" } ?? "table undecided"
             events.append(.note("KingSmith text handshake complete (\(table)) — driving the belt over it", isWarning: false))
             events.append(.handshakeComplete)
-        } else if !handshake.isComplete {
+        } else if !handshake.isComplete, textHandshakeRunning {
             events += handshakeWrites(now: now)
         }
         return events
@@ -455,14 +483,16 @@ public final class FTMSDialect: BeltDialect {
         assembler = FTMS.StatusAssembler()
         sawFirstMachineEvent = false
         unparsedFramesLogged = 0
-        hasTextChannel = false
+        hasSupplementPair = false
+        unlockFrame = nil
+        isUnlocked = false
         hasDedicatedTextPair = false
-        textNotify = FTMSDialect.textNotifyUUID
-        textWrite = FTMSDialect.textWriteUUID
         handshake = KSText.Handshake()
+        textHandshakeRunning = false
         usesTextProtocol = false
-        usesVendorStatus = false
         textBuffer.removeAll()
         textAssembler = KSText.StatusAssembler()
+        lastControlWrite = nil
+        retriedLastControl = false
     }
 }
