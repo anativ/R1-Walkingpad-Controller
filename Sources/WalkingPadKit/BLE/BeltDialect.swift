@@ -40,6 +40,10 @@ public enum BeltEvent: Equatable {
     /// The dialect wants these written now, in order, this far apart — a handshake reply that
     /// calls for the next step, for instance. Not a user command, so it bypasses the command queue.
     case send([BeltWrite], spacing: TimeInterval)
+    /// Repeat a refused command, preceded by whatever the belt needs first. Unlike `.send` this
+    /// competes with user commands, so the controller drops it the moment a newer one exists:
+    /// a Stop must never wait behind a replayed speed.
+    case retry([BeltWrite], spacing: TimeInterval)
     /// The dialect's reply-driven bring-up is finished (or there was none to do).
     case handshakeComplete
 }
@@ -449,7 +453,7 @@ public final class FTMSDialect: BeltDialect {
         retriedLastControl = true
         let requestControl = BeltWrite(characteristic: FTMSDialect.controlPointUUID, bytes: FTMS.requestControlBytes)
         return [.note("Requesting control again and retrying once", isWarning: true),
-                .send([requestControl, last], spacing: FTMSDialect.controlRetrySpacing)]
+                .retry([requestControl, last], spacing: FTMSDialect.controlRetrySpacing)]
     }
 
     /// Replies arrive in pieces and end with a carriage return.

@@ -491,6 +491,8 @@ public final class PadController: NSObject, ObservableObject {
         }
 
         guard let write = dialect.encode(outgoing), characteristics[write.characteristic] != nil else { return }
+        // A retry of an older command that has not gone out yet is superseded by this one.
+        if !outgoing.isStatusPoll { writeBacklog.removeAll { $0.isRetry } }
         scheduleWrites([write], spacing: KSText.chunkSpacing)
         dialect.didSend(write)
         lastSendAt = Date()
@@ -514,16 +516,16 @@ public final class PadController: NSObject, ObservableObject {
     }
 
     /// Writes waiting their turn, each already cut to the size its firmware accepts.
-    private var writeBacklog: [(characteristic: CBUUID, bytes: [UInt8], spacing: TimeInterval, withoutResponse: Bool)] = []
+    private var writeBacklog: [(characteristic: CBUUID, bytes: [UInt8], spacing: TimeInterval, withoutResponse: Bool, isRetry: Bool)] = []
     private var writeChainActive = false
 
     /// Queue writes to go out in order, `spacing` apart, one BLE write at a time. Multi-piece
     /// writes (the text protocol's 16-byte chunks) stay contiguous and in order.
-    private func scheduleWrites(_ writes: [BeltWrite], spacing: TimeInterval) {
+    private func scheduleWrites(_ writes: [BeltWrite], spacing: TimeInterval, isRetry: Bool = false) {
         for write in writes {
             guard characteristics[write.characteristic] != nil else { continue }
             for piece in write.pieces {
-                writeBacklog.append((write.characteristic, piece, spacing, write.withoutResponse))
+                writeBacklog.append((write.characteristic, piece, spacing, write.withoutResponse, isRetry))
             }
         }
         drainWriteBacklog()
@@ -1037,6 +1039,18 @@ extension PadController: CBPeripheralDelegate {
                 appendLog("TX \(write.bytes.map { String(format: "%02x", $0) }.joined(separator: " "))", .tx)
             }
             scheduleWrites(writes, spacing: spacing)
+        case .retry(let writes, let spacing):
+            // Only while nothing newer is waiting: a queued or held command (a Stop, above all)
+            // supersedes the refused one, and `sendNext` purges a retry still in the backlog.
+            let newerPending = !queue.pendingControl.isEmpty || heldSpeedRaw != nil
+            guard !newerPending else {
+                appendLog("A newer command is waiting — not retrying the refused one", .info)
+                break
+            }
+            for write in writes {
+                appendLog("TX \(write.bytes.map { String(format: "%02x", $0) }.joined(separator: " "))", .tx)
+            }
+            scheduleWrites(writes, spacing: spacing, isRetry: true)
         case .handshakeComplete:
             handshakeRetryTimer?.invalidate()
             handshakeRetryTimer = nil

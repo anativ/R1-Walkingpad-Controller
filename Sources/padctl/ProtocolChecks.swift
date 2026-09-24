@@ -1978,23 +1978,25 @@ func ftmsRetriesACommandRefusedForLackOfControl() throws {
     let speed = try require(z1.encode(.setSpeed(30)))
     z1.didSend(speed)
     let first = z1.decode(characteristic: cp, bytes: [0x80, 0x02, 0x05], now: Date())
-    check(first.contains(.send([requestControl, speed], spacing: 0.7)), "re-request, then the same bytes, 0.7 s apart")
+    check(first.contains(.retry([requestControl, speed], spacing: 0.7)), "re-request, then the same bytes, 0.7 s apart")
     check(!z1.decode(characteristic: cp, bytes: [0x80, 0x02, 0x05], now: Date())
-            .contains { if case .send = $0 { return true }; return false }, "only once")
+            .contains { if case .retry = $0 { return true }; return false }, "only once")
 
     let start = try require(z1.encode(.start))
     z1.didSend(start)
     check(!z1.decode(characteristic: cp, bytes: [0x80, 0x02, 0x05], now: Date())
-            .contains { if case .send = $0 { return true }; return false }, "a stale refusal never replays an older command")
+            .contains { if case .retry = $0 { return true }; return false }, "a stale refusal never replays an older command")
     check(!z1.decode(characteristic: cp, bytes: [0x80, 0x07, 0x04], now: Date())
-            .contains { if case .send = $0 { return true }; return false }, "other failures are not retried")
+            .contains { if case .retry = $0 { return true }; return false }, "other failures are not retried")
     check(z1.decode(characteristic: cp, bytes: [0x80, 0x07, 0x05], now: Date())
-            .contains(.send([requestControl, start], spacing: 0.7)))
+            .contains(.retry([requestControl, start], spacing: 0.7)))
     z1.didSend(requestControl)
     check(!z1.decode(characteristic: cp, bytes: [0x80, 0x00, 0x05], now: Date())
-            .contains { if case .send = $0 { return true }; return false }, "a refused request control is not looped")
+            .contains { if case .retry = $0 { return true }; return false }, "a refused request control is not looped")
     check(ClassicDialect().decode(characteristic: ClassicDialect.notifyUUID, bytes: [0x80, 0x02, 0x05], now: Date())
-            .allSatisfy { if case .send = $0 { return false }; return true })
+            .allSatisfy { if case .retry = $0 { return false }; return true })
+    check(!first.contains { if case .send = $0 { return true }; return false },
+          "a retry is never a plain send, which would skip the controller's freshness check")
 }
 
 /// The Z1 path logs verbosely unless told otherwise; the classic belt does not. A remembered
